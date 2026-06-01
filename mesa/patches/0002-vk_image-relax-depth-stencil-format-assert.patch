@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: builder <builder@winlator>
+Date: Mon, 1 Jun 2026 00:00:00 +0300
+Subject: [PATCH] vk_image: relax depth/stencil format assertion
+
+Silently override the image view format to match the image format when
+a depth/stencil view is created with a mismatched format. Proprietary
+Qualcomm drivers accept this format mismatch; removing the assertion
+lets DXVK work on Turnip similarly.
+---
+ src/vulkan/runtime/vk_image.c | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/src/vulkan/runtime/vk_image.c b/src/vulkan/runtime/vk_image.c
+index f5e6764..5afc2ed 100644
+--- a/src/vulkan/runtime/vk_image.c
++++ b/src/vulkan/runtime/vk_image.c
+@@ -557,13 +557,11 @@ vk_image_view_init(struct vk_device *device,
+           !(image->usage & video))
+          assert(image_view->format == image->format);
+ 
+-      /* From the Vulkan 1.2.184 spec:
+-       *
+-       *    "Each depth/stencil format is only compatible with itself."
+-       */
+       if (image_view->aspects & (VK_IMAGE_ASPECT_DEPTH_BIT |
+-                                 VK_IMAGE_ASPECT_STENCIL_BIT))
+-         assert(image_view->format == image->format);
++                                 VK_IMAGE_ASPECT_STENCIL_BIT)) {
++         if (image_view->format != image->format)
++            image_view->format = image->format;
++      }
+ 
+       if (!(image->create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT))
+          assert(image_view->format == image->format);
+-- 
+2.54.0

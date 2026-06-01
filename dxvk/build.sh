@@ -15,7 +15,7 @@ LLVM_MINGW_VER=$(yq ".${PKG_NAME}.mingw_ver" "$ROOT_DIR/packages.yml")
 HOST_ARCH="$(uname -m)"
 LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-22.04-${HOST_ARCH}.tar.xz"
 
-echo -e "${green}=== DXVK GPLAsync-LowLatency Builder (aarch64 PE) ===${nocolor}"
+echo -e "${green}=== DXVK GPLAsync-LowLatency Builder (aarch64 + i686 PE) ===${nocolor}"
 
 # --- Toolchain setup ---
 TOOLCHAIN_DIR="$WORKDIR/toolchain"
@@ -123,6 +123,72 @@ fi
 
 ninja -C "$BUILD_DIR" install
 
+# --- i686 PE build for 32-bit games (syswow64) ---
+I686_CC="$TOOLCHAIN_BIN/i686-w64-mingw32-clang"
+I686_CXX="$TOOLCHAIN_BIN/i686-w64-mingw32-clang++"
+I686_AR="$TOOLCHAIN_BIN/i686-w64-mingw32-llvm-ar"
+I686_STRIP="$TOOLCHAIN_BIN/i686-w64-mingw32-strip"
+I686_WINDRES="$TOOLCHAIN_BIN/i686-w64-mingw32-windres"
+
+if [ ! -x "$I686_CC" ]; then
+    echo -e "${red}i686-w64-mingw32-clang not found in toolchain${nocolor}"
+    exit 1
+fi
+
+I686_CROSSFILE="$WORKDIR/dxvk-cross-i686.txt"
+cat > "$I686_CROSSFILE" << CROSSEOF
+[binaries]
+c     = '$I686_CC'
+cpp   = '$I686_CXX'
+ar    = '$I686_AR'
+strip = '$I686_STRIP'
+windres = '$I686_WINDRES'
+
+[properties]
+needs_exe_wrapper = true
+
+[built-in options]
+c_args = ['-march=i686', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
+cpp_args = ['-march=i686', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
+c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
+cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
+
+[host_machine]
+system = 'windows'
+cpu_family = 'x86'
+cpu = 'i686'
+endian = 'little'
+CROSSEOF
+
+I686_BUILD_DIR="$WORKDIR/build-i686"
+I686_INSTALL_DIR="$WORKDIR/install-i686"
+
+if [ ! -f "$I686_BUILD_DIR/build.ninja" ]; then
+    echo "Configuring Meson (i686-w64-mingw32)..."
+    meson setup "$I686_BUILD_DIR" "$WORKDIR/dxvk" \
+        --cross-file "$I686_CROSSFILE" \
+        --buildtype release \
+        --strip \
+        --prefix "$I686_INSTALL_DIR" \
+        --bindir "x32" \
+        --libdir "x32" \
+        -Db_ndebug=if-release \
+        &> "$WORKDIR/meson_log_i686"
+fi
+
+echo "Building i686..."
+set -o pipefail
+ninja -C "$I686_BUILD_DIR" -j"$(nproc)" 2>&1 | tee "$WORKDIR/build_log_i686"
+BUILD_RC=${PIPESTATUS[0]}
+set +o pipefail
+if [ "$BUILD_RC" -ne 0 ]; then
+    echo -e "${red}i686 build failed (exit code $BUILD_RC)${nocolor}"
+    echo "Check $WORKDIR/build_log_i686"
+    exit 1
+fi
+
+ninja -C "$I686_BUILD_DIR" install
+
 # --- Package ---
 echo "Packaging..."
 PKGDIR="$WORKDIR/package"
@@ -130,16 +196,18 @@ mkdir -p "$PKGDIR/system32"
 mkdir -p "$PKGDIR/syswow64"
 
 cp -v "$INSTALL_DIR/x64/"*.dll "$PKGDIR/system32/"
-cp -v "$INSTALL_DIR/x64/"*.dll "$PKGDIR/syswow64/"
+cp -v "$I686_INSTALL_DIR/x32/"*.dll "$PKGDIR/syswow64/"
 
 DLL_COUNT=$(find "$PKGDIR/system32" -name "*.dll" 2>/dev/null | wc -l)
-if [ "$DLL_COUNT" -eq 0 ]; then
-    echo -e "${red}Build failed: no DLLs found in build output${nocolor}"
-    echo "Check $WORKDIR/build_log"
+I686_DLL_COUNT=$(find "$PKGDIR/syswow64" -name "*.dll" 2>/dev/null | wc -l)
+if [ "$DLL_COUNT" -eq 0 ] || [ "$I686_DLL_COUNT" -eq 0 ]; then
+    echo -e "${red}Build failed: missing DLLs (system32=$DLL_COUNT, syswow64=$I686_DLL_COUNT)${nocolor}"
+    echo "Check $WORKDIR/build_log and $WORKDIR/build_log_i686"
     exit 1
 fi
-echo -e "${green}Found $DLL_COUNT DLL(s)${nocolor}"
+echo -e "${green}Found $DLL_COUNT aarch64 DLL(s), $I686_DLL_COUNT i686 DLL(s)${nocolor}"
 ls -la "$PKGDIR/system32/"
+ls -la "$PKGDIR/syswow64/"
 
 # --- Config.json ---
 cat > "$PKGDIR/Config.json" << 'CONFEOF'
@@ -176,7 +244,7 @@ cat > "$PKGDIR/profile.json" << PROEOF
   "type": "DXVK",
   "versionName": "$DXVK_VERSION_NAME",
   "versionCode": 0,
-  "description": "DXVK GPLAsync-LowLatency $DXVK_VERSION — Oryon optimized (aarch64 PE)",
+  "description": "DXVK GPLAsync-LowLatency $DXVK_VERSION — Oryon optimized (aarch64 + i686 PE)",
   "files": [$DLL_FILES
   ]
 }
