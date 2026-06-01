@@ -4,6 +4,8 @@ mesa:
   branch: turnip/gen8
   output: mesa-{version}.zip
   sdk_ver: 35
+  buildtype: release
+  localPatches: mesa/patches
 
 fexcore:
   description: FEXCore CPU emulation layer

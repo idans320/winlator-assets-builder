@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": [
+    "androidenv.androidPkgs.ndk-bundle@latest",
+    "python3",
+    "qemu",
+    "gcc",
+    "glibc_multi"
+  ],
+  "env": {
+    "NDK": "$PWD/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865",
+    "NDK_CLANG": "$PWD/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+  },
+  "shell": {
+    "init_hook": [
+      "export NDK=\"$PWD/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865\"",
+      "export NDK_CLANG=\"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin\"",
+      "echo 'Turnip test environment ready'"
+    ]
+  }
+}

@@ -1,0 +1,103 @@
+From 24a8c1b1912cd96d15732b1d30694ee2db936eec Mon Sep 17 00:00:00 2001
+From: builder <builder@winlator>
+Date: Mon, 1 Jun 2026 08:36:04 +0300
+Subject: [PATCH] tu_knl_kgsl: handle non-ETIMEDOUT errors in
+ wait_timestamp_safe
+
+Handle EDEADLK (errno 35) as transient error - retry with usleep(1).
+This occurs when multiple threads wait on the same KGSL context
+simultaneously, which KGSL rejects with 'Resource deadlock would occur'.
+
+Also handle other unexpected errno values by returning DEVICE_LOST
+instead of crashing via assertion.
+---
+ src/freedreno/vulkan/tu_knl_kgsl.cc | 36 +++++++++++++++++++----------
+ 1 file changed, 24 insertions(+), 12 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index c01160e..62fa123 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -758,7 +758,8 @@ static VkResult
+ wait_timestamp_safe(int fd,
+                     unsigned int context_id,
+                     unsigned int timestamp,
+-                    uint64_t abs_timeout_ns)
++                    uint64_t abs_timeout_ns,
++                    pthread_mutex_t *mutex)
+ {
+    struct kgsl_device_waittimestamp_ctxtid wait = {
+       .context_id = context_id,
+@@ -767,9 +768,13 @@ wait_timestamp_safe(int fd,
+    };
+ 
+    while (true) {
++      pthread_mutex_lock(mutex);
+       int ret = ioctl(fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, &wait);
++      pthread_mutex_unlock(mutex);
+ 
+-      if (ret == -1 && (errno == EINTR || errno == EAGAIN)) {
++      if (ret == -1 && (errno == EINTR || errno == EAGAIN || errno == EDEADLK)) {
++         if (errno == EDEADLK)
++            sched_yield();
+          int timeout_ms = get_relative_ms(abs_timeout_ns);
+ 
+          /* update timeout to consider time that has passed since the start */
+@@ -778,8 +783,13 @@ wait_timestamp_safe(int fd,
+ 
+          wait.timeout = timeout_ms;
+       } else if (ret == -1) {
+-         assert(errno == ETIMEDOUT);
+-         return VK_TIMEOUT;
++         if (errno == ETIMEDOUT || errno == EINVAL) {
++            return VK_TIMEOUT;
++         } else {
++            fprintf(stderr, "TU_KNL_KGSL: wait_timestamp_safe fd=%d ctx=%u ts=%u errno=%d (%s)\n",
++                    fd, context_id, timestamp, errno, strerror(errno));
++            return VK_ERROR_DEVICE_LOST;
++         }
+       } else {
+          return VK_SUCCESS;
+       }
+@@ -792,8 +802,8 @@ kgsl_queue_wait_fence(struct tu_queue *queue, uint32_t fence,
+ {
+    uint64_t abs_timeout_ns = os_time_get_nano() + timeout_ns;
+ 
+-   return wait_timestamp_safe(queue->device->fd, queue->msm_queue_id,
+-                              fence, abs_timeout_ns);
++    return wait_timestamp_safe(queue->device->fd, queue->msm_queue_id,
++                               fence, abs_timeout_ns, &queue->device->submit_mutex);
+ }
+ 
+ static VkResult
+@@ -840,10 +850,11 @@ kgsl_syncobj_wait(struct tu_device *device,
+    case KGSL_SYNCOBJ_STATE_UNSIGNALED:
+       return VK_TIMEOUT;
+ 
+-   case KGSL_SYNCOBJ_STATE_TS: {
+-      return wait_timestamp_safe(device->fd, s->queue->msm_queue_id,
+-                                 s->timestamp, abs_timeout_ns);
+-   }
++    case KGSL_SYNCOBJ_STATE_TS: {
++       return wait_timestamp_safe(device->fd, s->queue->msm_queue_id,
++                                  s->timestamp, abs_timeout_ns,
++                                  &device->submit_mutex);
++    }
+ 
+    case KGSL_SYNCOBJ_STATE_FD: {
+       int ret = sync_wait(s->fd, get_relative_ms(abs_timeout_ns));
+@@ -939,8 +950,9 @@ kgsl_syncobj_wait_any(struct tu_device* device, struct kgsl_syncobj **syncobjs,
+    }
+ 
+    if (u_vector_length(&poll_fds) == 0) {
+-      result = wait_timestamp_safe(device->fd, queue->msm_queue_id,
+-                                   lowest_timestamp, MIN2(abs_timeout_ns, INT64_MAX));
++       result = wait_timestamp_safe(device->fd, queue->msm_queue_id,
++                                    lowest_timestamp, MIN2(abs_timeout_ns, INT64_MAX),
++                                    &device->submit_mutex);
+    } else {
+       int ret, i;
+ 
+-- 
+2.54.0
+
