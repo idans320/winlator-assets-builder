@@ -1,0 +1,84 @@
+diff --git a/src/freedreno/vulkan/tu_cs.cc b/src/freedreno/vulkan/tu_cs.cc
+index 47e1939..2d0f12d 100644
+--- a/src/freedreno/vulkan/tu_cs.cc
++++ b/src/freedreno/vulkan/tu_cs.cc
+@@ -35,6 +35,17 @@ tu_cs_init(struct tu_cs *cs,
+    cs->mode = mode;
+    cs->next_bo_size = initial_size;
+    cs->name = name;
++
++   /* Initialize shadow register cache for gen8+.  256-entry hash table
++    * catches redundant PKT4 writes in blit/clear/draw paths.
++    */
++   if (device->physical_device->info->chip >= A8XX) {
++      uint32_t size = 512; /* 512 slots, must be power of 2 */
++      cs->regcache.keys = (uint32_t *)calloc(size, sizeof(uint32_t));
++      cs->regcache.values = (uint32_t *)calloc(size, sizeof(uint32_t));
++      cs->regcache.mask = size - 1;
++      cs->regcache.enabled = (cs->regcache.keys && cs->regcache.values);
++   }
+ }
+ 
+ /**
+@@ -96,6 +107,8 @@ tu_cs_finish(struct tu_cs *cs)
+    free(cs->entries);
+    free(cs->read_only.bos);
+    free(cs->read_write.bos);
++   free(cs->regcache.keys);
++   free(cs->regcache.values);
+ }
+ 
+ static struct tu_bo *
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+index 6a66de1..39aa5ad 100644
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -108,6 +108,16 @@ struct tu_cs
+    /* iova that this CS starts with in TU_CS_MODE_EXTERNAL */
+    uint64_t external_iova;
+ 
++   /* Shadow register cache for PKT4 writes.  Enabled on gen8+ to skip
++    * redundant register writes.  4KB flat hash table for 256 entries.
++    */
++   struct {
++      uint32_t    *keys;
++      uint32_t    *values;
++      uint32_t    mask;
++      bool        enabled;
++   } regcache;
++
+    /* state for cond_exec_start/cond_exec_end */
+    uint32_t cond_stack_depth;
+    uint32_t cond_flags[TU_COND_EXEC_STACK_SIZE];
+@@ -370,6 +380,31 @@ tu_cs_emit_qw(struct tu_cs *cs, uint64_t value)
+ static inline void
+ tu_cs_emit_write_reg(struct tu_cs *cs, uint16_t reg, uint32_t value)
+ {
++   /* Shadow register cache: skip if value unchanged since last write.
++    * Update cache with the new value after emitting.
++    */
++   if (cs->regcache.enabled) {
++      uint32_t idx = reg & cs->regcache.mask;
++      for (uint32_t i = 0; i < 8; i++) {
++         uint32_t probe = (idx + i) & cs->regcache.mask;
++         if (cs->regcache.keys[probe] == reg) {
++            if (cs->regcache.values[probe] == value)
++               return; /* skip — cached value matches */
++            cs->regcache.values[probe] = value;
++            break;
++         }
++      }
++      /* Not in cache — insert */
++      for (uint32_t i = 0; i < 8; i++) {
++         uint32_t probe = (idx + i) & cs->regcache.mask;
++         if (cs->regcache.keys[probe] == 0) {
++            cs->regcache.keys[probe] = reg;
++            cs->regcache.values[probe] = value;
++            break;
++         }
++      }
++   }
++
+    tu_cs_emit_pkt4(cs, reg, 1);
+    tu_cs_emit(cs, value);
+ }

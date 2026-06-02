@@ -1,0 +1,7 @@
+{
+    "file_format_version": "1.0.0",
+    "ICD": {
+        "library_path": "/home/idans/winlator-cmod-builder/mesa/workdir/mesa/build-native/src/freedreno/vulkan/libvulkan_freedreno.so",
+        "api_version": "1.3.0"
+    }
+}

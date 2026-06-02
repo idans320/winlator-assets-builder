@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": [
+    "go@1.22",
+    "graphviz",
+    "clang@17"
+  ],
+  "env": {
+    "MESA_SRC": "$PWD/../mesa/workdir/mesa"
+  },
+  "shell": {
+    "init_hook": [
+      "export MESA_SRC=\"$PWD/../mesa/workdir/mesa\"",
+      "mkdir -p output",
+      "echo 'Turnip gen8 AST analysis environment ready'",
+      "echo '  Mesa source: $MESA_SRC'",
+      "echo '  Run: go run ./cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json'",
+      "echo '  Run: go run ./cmd/graph-gen --input output/analysis.json --outdir output/'"
+    ],
+    "scripts": {
+      "analyze": "go run ./analysis/cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json",
+      "graph": "go run ./analysis/cmd/graph-gen --input output/analysis.json --outdir output/",
+      "all": "go run ./analysis/cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json && go run ./analysis/cmd/graph-gen --input output/analysis.json --outdir output/ && echo Done! Diagrams in output/",
+      "fuzz": "go run ./gpu-stub/cmd/gpu-fuzz --input output/analysis.json"
+    }
+  }
+}
