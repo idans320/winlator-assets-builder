@@ -1,0 +1,16 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float16_t scratch[256];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    float16_t v = float16_t(float(gl_GlobalInvocationID.x) * 0.001);
+    for (int i = 0; i < 500; i++) {
+        v = sin(v) * cos(v) + sqrt(abs(v) + float16_t(0.001hf));
+        v = fract(v * float16_t(1337.0hf)) * float16_t(2.0hf) - float16_t(1.0hf);
+    }
+    scratch[idx] = v;
+}

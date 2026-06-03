@@ -14,6 +14,7 @@ fexcore:
   output: fexcore-{version}.wcp
   mingw_ver: "20260519"
   preset: elitex
+  localPatches: fexcore/patches
 
 wine:
   description: Wine 11 Proton ARM64 + ARM64EC
@@ -40,3 +41,9 @@ dxvk:
   output: "{version}-arm64ec-gplasync.wcp"
   mingw_ver: "20260519"
   preset: elitex
+
+benchmark:
+  description: Vulkan GPU benchmark for Turnip driver optimization tracking
+  sdk_ver: 35
+  output: bench-vulkan-{version}.zip
+  bench_version: "1.0.0"

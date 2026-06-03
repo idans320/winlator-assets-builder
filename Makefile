@@ -1,4 +1,4 @@
-.PHONY: mesa fexcore wine box64 dxvk
+.PHONY: mesa fexcore wine box64 dxvk benchmark
 
 mesa:
 	devbox run -- ./mesa/build.sh
@@ -14,3 +14,6 @@ box64:
 
 dxvk:
 	devbox run -- ./dxvk/build.sh
+
+benchmark:
+	devbox run -- ./benchmark/build.sh

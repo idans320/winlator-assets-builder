@@ -53,9 +53,23 @@ if [ ! -d "$WORKDIR/fex" ]; then
     git clone --recurse-submodules --depth 1 --branch "$FEX_BRANCH" "$FEX_REPO" "$WORKDIR/fex" 2>&1
 fi
 
-FEX_VERSION=$(cd "$WORKDIR/fex" && git rev-parse --short HEAD)
+FEX_VERSION="$(cd "$WORKDIR/fex" && git rev-parse --short HEAD)-experimental"
 FEX_COMMIT_DATE=$(cd "$WORKDIR/fex" && git log -1 --format=%ct 2>/dev/null || date +%s)
 echo -e "${green}FEX version: $FEX_VERSION${nocolor}"
+
+# Apply local patches first
+# --- Apply local patches ---
+FEX_LOCAL_PATCHES=$(yq ".${PKG_NAME}.localPatches // \"\"" "$ROOT_DIR/packages.yml")
+if [ -n "$FEX_LOCAL_PATCHES" ] && [ "$FEX_LOCAL_PATCHES" != "null" ]; then
+    echo "Applying FEXCore patches from $FEX_LOCAL_PATCHES..."
+    find "$ROOT_DIR/$FEX_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort | while read -r patch; do
+        echo "  Applying $(basename "$patch")..."
+        git -C "$WORKDIR/fex" am "$patch" 2>&1 || {
+            echo -e "${red}  Patch $(basename "$patch") FAILED — check $WORKDIR/fex git status${nocolor}"
+            exit 1
+        }
+    done
+fi
 
 # FEX's WOW64 DLL links with -nostdlib/-nodefaultlibs which omits sincos.
 # Provide a standalone stub to avoid pulling in all of mingwex (symbol conflicts).
@@ -68,6 +82,18 @@ void sincos(double x, double *s, double *c) { *s = sin(x); *c = cos(x); }' > "$S
         echo -e "${red}Failed to compile sincos stub${nocolor}"
         exit 1
     }
+fi
+
+# Fix dlltool: generate aarch64 import libs, not x86_64
+if ! grep -q -- '-m arm64' "$WORKDIR/fex/Source/Windows/CMakeLists.txt" 2>/dev/null; then
+    sed -i 's|${CMAKE_DLLTOOL} -d|${CMAKE_DLLTOOL} -m arm64 -d|' \
+        "$WORKDIR/fex/Source/Windows/CMakeLists.txt"
+fi
+
+# Use bundled fmt (system fmt causes IMPORTED_IMPLIB errors on cross-compile)
+if grep -q 'find_package(fmt QUIET)' "$WORKDIR/fex/CMakeLists.txt" 2>/dev/null; then
+    sed -i '/^find_package(fmt QUIET)/,/^endif()/c\# Use bundled fmt for cross-compile\nset(FMT_INSTALL OFF)\nadd_subdirectory(External/fmt/)' \
+        "$WORKDIR/fex/CMakeLists.txt"
 fi
 
 # --- Configure & Build ---
@@ -100,19 +126,22 @@ if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
         -DCMAKE_CXX_FLAGS="$ORYON_FLAGS" \
         -DENABLE_LTO=OFF \
          -DUSE_LINKER=lld \
-         -DBUILD_TESTS=OFF \
-         -DBUILD_FEXCONFIG=OFF \
-         -DBUILD_THUNKS=OFF \
+          -DBUILD_TESTING=OFF \
+          -DBUILD_FEXCONFIG=OFF \
+          -DTUNE_CPU=oryon-1 \
+          -DBUILD_THUNKS=OFF \
          -DENABLE_ASSERTIONS=OFF \
          -DENABLE_JEMALLOC_GLIBC_ALLOC=ON \
         &> "$WORKDIR/cmake_log"
 fi
 
 echo "Building..."
+set +e
 set -o pipefail
 cmake --build "$BUILD_DIR" -j"$(nproc)" 2>&1 | tee "$WORKDIR/build_log"
 BUILD_RC=${PIPESTATUS[0]}
-set +o pipefail
+set -o pipefail
+set -e
 if [ "$BUILD_RC" -ne 0 ]; then
     echo -e "${red}Build failed (exit code $BUILD_RC)${nocolor}"
 fi

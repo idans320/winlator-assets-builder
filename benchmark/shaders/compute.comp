@@ -1,0 +1,14 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared float scratch[256];
+
+void main() {
+    uint idx = gl_LocalInvocationID.x;
+    float v = float(gl_GlobalInvocationID.x) * 0.001;
+    for (int i = 0; i < 500; i++) {
+        v = sin(v) * cos(v) + sqrt(abs(v) + 0.001);
+        v = fract(v * 1337.0) * 2.0 - 1.0;
+    }
+    scratch[idx] = v;
+}

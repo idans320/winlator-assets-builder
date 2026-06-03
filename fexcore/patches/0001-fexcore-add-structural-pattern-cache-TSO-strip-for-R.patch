@@ -1,0 +1,296 @@
+From c02508efcb6cb4cd0d834de213c9575b22282afd Mon Sep 17 00:00:00 2001
+From: Idan Shani <idan.shani32@gmail.com>
+Date: Wed, 3 Jun 2026 12:11:38 +0300
+Subject: [PATCH] fexcore: add structural pattern cache + TSO strip for RBP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PatternCache.h: 256-entry structural template cache keyed by (IROp<<32|OpSize).
+Gated by FEXCORE_PATTERN_CACHE=1 env var. Warmup captures raw ARM64 byte sequences
+per IR op. Steady-state lookup avoids entire DEF_OP dispatch for cache hits.
+
+JIT.cpp: hooks in CompileCode() dispatch loop — capture during warmup, memcpy+skip
+during steady state. LogStats() output at end of each compilation.
+
+JITClass.h: PatternCache member + EmitTrackState per-op capture tracker.
+
+OpcodeDispatcher.h: extend IsNonTSOReg() to include RBP alongside RSP. RBP-based
+stack accesses now emit plain ldr/str instead of ldar/stlr, stripping TSO barriers
+for all local variable access in x86 frame-pointer functions.
+---
+ FEXCore/Source/Interface/Core/JIT/JIT.cpp     | 87 +++++++++++++++++
+ FEXCore/Source/Interface/Core/JIT/JITClass.h  | 12 +++
+ .../Source/Interface/Core/JIT/PatternCache.h  | 97 +++++++++++++++++++
+ .../Source/Interface/Core/OpcodeDispatcher.h  |  2 +-
+ 4 files changed, 197 insertions(+), 1 deletion(-)
+ create mode 100644 FEXCore/Source/Interface/Core/JIT/PatternCache.h
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index b9c1aef..b3e6adf 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -79,6 +79,30 @@ static void PrintVectorValue(uint64_t Value, uint64_t ValueUpper) {
+ 
+ namespace FEXCore::CPU {
+ 
++static uint64_t MakePatternHash(const IR::IROp_Header* IROp) {
++    return ((uint64_t)IROp->Op << 32) |
++           ((uint64_t)IROp->Size << 24) |
++           ((uint64_t)IROp->ElementSize << 16);
++}
++
++static void PatchTemplateRegisters(uint8_t* dst, const PatternTemplate* tmpl, uint8_t* new_regs) {
++    std::memcpy(dst, tmpl->Bytes, tmpl->ByteSize);
++    for (uint8_t i = 0; i < tmpl->NumRegArgs && i < PatternTemplate::MaxRegArgs; i++) {
++        uint8_t old_reg = tmpl->CapturedRegs[i];
++        uint8_t new_reg = new_regs[i];
++        if (old_reg == new_reg) continue;
++        static const uint8_t kShifts[] = {0, 5, 10, 16};
++        for (uint16_t off = 0; off < tmpl->ByteSize; off += 4) {
++            uint32_t* insn = reinterpret_cast<uint32_t*>(dst + off);
++            for (uint8_t shift : kShifts) {
++                if (((*insn >> shift) & 0x1F) == old_reg) {
++                    *insn = (*insn & ~(0x1Fu << shift)) | (uint32_t(new_reg) << shift);
++                }
++            }
++        }
++    }
++}
++
+ void Arm64JITCore::Op_Unhandled(const IR::IROp_Header* IROp, IR::Ref Node) {
+   FallbackInfo Info;
+   if (!InterpreterOps::GetFallbackHandler(IROp, &Info)) {
+@@ -960,6 +984,38 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+     }
+ 
+     for (auto [CodeNode, IROp] : IR->GetCode(BlockNode)) {
++      const auto Hash = MakePatternHash(IROp);
++
++      if (PatCache.IsEnabled() && !PatCache.IsWarmup()) {
++        const auto* cached = PatCache.Lookup(Hash);
++        if (cached && cached->ByteSize > 0 && cached->ByteSize <= 128) {
++          uint8_t new_regs[PatternTemplate::MaxRegArgs] {};
++          uint8_t num_ra = IR::GetRAArgs(IROp->Op);
++          auto reg_class = IR::GetRegClass(IROp->Op);
++          bool is_fpr = (reg_class == IR::RegClass::FPR || reg_class == IR::RegClass::FPRFixed);
++
++          if (num_ra > 0 && num_ra <= PatternTemplate::MaxRegArgs) {
++            new_regs[0] = is_fpr ? GetVReg(CodeNode).Idx() : GetReg(CodeNode).Idx();
++            for (uint8_t a = 1; a < num_ra; a++) {
++              new_regs[a] = is_fpr ? GetVReg(IROp->Args[a - 1]).Idx() : GetReg(IROp->Args[a - 1]).Idx();
++            }
++          }
++
++          PatchTemplateRegisters(GetCursorAddress<uint8_t*>(), cached, new_regs);
++          CursorIncrement(cached->ByteSize);
++          PatCache.RecordHit();
++          continue;
++        }
++        PatCache.RecordMiss();
++      }
++
++      if (PatCache.IsEnabled() && PatCache.IsWarmup()) {
++        EmitTrack.start_offset = GetCursorOffset();
++        EmitTrack.ir_op = IROp->Op;
++        EmitTrack.op_size = static_cast<uint8_t>(IROp->Size);
++        EmitTrack.capturing = true;
++      }
++
+       switch (IROp->Op) {
+ #define REGISTER_OP(op, x) \
+   case FEXCore::IR::IROps::OP_##op: Op_##x(IROp, CodeNode); break
+@@ -970,6 +1026,33 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+ 
+       default: Op_Unhandled(IROp, CodeNode); break;
+       }
++
++      if (EmitTrack.capturing) {
++        EmitTrack.capturing = false;
++        const auto end_offset = GetCursorOffset();
++        const auto emit_size = end_offset - EmitTrack.start_offset;
++        if (emit_size > 0 && emit_size <= 128) {
++          PatternTemplate tmpl {};
++          tmpl.Hash = Hash;
++          tmpl.ByteSize = static_cast<uint16_t>(emit_size);
++          std::memcpy(tmpl.Bytes, GetBufferBase() + EmitTrack.start_offset, emit_size);
++
++          uint8_t num_ra = IR::GetRAArgs(IROp->Op);
++          auto reg_class = IR::GetRegClass(IROp->Op);
++          bool is_fpr = (reg_class == IR::RegClass::FPR || reg_class == IR::RegClass::FPRFixed);
++
++          if (num_ra > 0 && num_ra <= PatternTemplate::MaxRegArgs) {
++            tmpl.CapturedRegs[0] = is_fpr ? GetVReg(CodeNode).Idx() : GetReg(CodeNode).Idx();
++            for (uint8_t a = 1; a < num_ra; a++) {
++              tmpl.CapturedRegs[a] = is_fpr ? GetVReg(IROp->Args[a - 1]).Idx() : GetReg(IROp->Args[a - 1]).Idx();
++            }
++            tmpl.NumRegArgs = num_ra;
++          }
++
++          PatCache.Insert(tmpl);
++        }
++        PatCache.TickWarmup();
++      }
+     }
+ 
+     DebugData->Subblocks.push_back({static_cast<uint32_t>(BlockStartHostCode - CodeData.BlockBegin),
+@@ -1158,6 +1241,10 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+ 
+   this->IR = nullptr;
+ 
++  if (PatCache.IsEnabled()) {
++    PatCache.LogStats();
++  }
++
+   return std::move(CodeData);
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+index 3e01eeb..05a9f8a 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -10,6 +10,7 @@ $end_info$
+ #include "Interface/Core/ArchHelpers/Arm64Emitter.h"
+ #include "Interface/Core/CPUBackend.h"
+ #include "Interface/Core/Dispatcher/Dispatcher.h"
++#include "Interface/Core/JIT/PatternCache.h"
+ #include "Interface/Core/JIT/Relocations.h"
+ #include "Interface/IR/IR.h"
+ #include "Interface/IR/IntrusiveIRList.h"
+@@ -107,6 +108,17 @@ private:
+ 
+   Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempAllocator;
+ 
++  PatternCache PatCache;
++
++  // Per-op emission tracking for template capture
++  struct EmitTrackState {
++    size_t  start_offset;
++    uint64_t ir_op;
++    uint8_t  op_size;
++    bool     capturing;
++  };
++  EmitTrackState EmitTrack {};
++
+   static uint64_t ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record);
+ 
+   [[nodiscard]]
+diff --git a/FEXCore/Source/Interface/Core/JIT/PatternCache.h b/FEXCore/Source/Interface/Core/JIT/PatternCache.h
+new file mode 100644
+index 0000000..dcc035c
+--- /dev/null
++++ b/FEXCore/Source/Interface/Core/JIT/PatternCache.h
+@@ -0,0 +1,97 @@
++#pragma once
++
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++namespace FEXCore::CPU {
++
++struct PatternTemplate {
++    uint64_t Hash;
++    uint16_t ByteSize;
++    uint8_t  NumRegArgs;
++    uint8_t  _pad;
++
++    uint8_t Bytes[128];
++
++    static constexpr int MaxRegArgs = 6;
++    uint8_t CapturedRegs[MaxRegArgs];
++};
++
++class PatternCache final {
++    static constexpr int MaxEntries = 256;
++    static constexpr int DefaultWarmup = 500;
++
++    PatternTemplate Table[MaxEntries] {};
++    uint32_t Count = 0;
++    uint32_t WarmupRemaining;
++    uint64_t Hits = 0;
++    uint64_t Misses = 0;
++    bool Enabled = false;
++
++public:
++    PatternCache() {
++        const char* env = getenv("FEXCORE_PATTERN_CACHE");
++        if (env && env[0] == '1') {
++            Enabled = true;
++            const char* wu = getenv("FEXCORE_PATTERN_WARMUP");
++            WarmupRemaining = wu ? (uint32_t)strtoul(wu, nullptr, 10) : DefaultWarmup;
++            fprintf(stderr, "[FEX] PatternCache: enabled, warmup=%u\n", WarmupRemaining);
++        } else {
++            WarmupRemaining = 0;
++        }
++    }
++
++    bool IsEnabled() const { return Enabled; }
++    bool IsWarmup() const { return WarmupRemaining > 0; }
++
++    void TickWarmup() {
++        if (WarmupRemaining > 0) {
++            WarmupRemaining--;
++            if (WarmupRemaining == 0) {
++                fprintf(stderr, "[FEX] PatternCache: warmup complete, %u entries cached\n", Count);
++            }
++        }
++    }
++
++    const PatternTemplate* Lookup(uint64_t hash) const {
++        for (uint32_t i = 0; i < Count; i++) {
++            if (Table[i].Hash == hash) {
++                return &Table[i];
++            }
++        }
++        return nullptr;
++    }
++
++    bool Insert(const PatternTemplate& tmpl) {
++        for (uint32_t i = 0; i < Count; i++) {
++            if (Table[i].Hash == tmpl.Hash) {
++                Table[i] = tmpl;
++                return false;
++            }
++        }
++        if (Count < MaxEntries) {
++            Table[Count++] = tmpl;
++        }
++        return true;
++    }
++
++    void RecordHit()  { Hits++; }
++    void RecordMiss() { Misses++; }
++
++    void LogStats() {
++        uint64_t total = Hits + Misses;
++        if (total > 0) {
++            fprintf(stderr, "[FEX] PatternCache: hits=%llu miss=%llu rate=%.1f%% entries=%u\n",
++                (unsigned long long)Hits, (unsigned long long)Misses,
++                total > 0 ? 100.0 * (double)Hits / (double)total : 0.0, Count);
++        }
++    }
++
++    uint32_t EntryCount() const { return Count; }
++    uint64_t HitCount()  const { return Hits; }
++    uint64_t MissCount() const { return Misses; }
++};
++
++} // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 5b1aa59..83d1ac7 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1588,7 +1588,7 @@ private:
+ 
+   [[nodiscard]]
+   static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
+-    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP;
++    return Access == MemoryAccessType::DEFAULT && (Reg == X86State::REG_RSP || Reg == X86State::REG_RBP);
+   }
+ 
+   AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
+-- 
+2.54.0
+
