@@ -122,12 +122,19 @@ contain geometry.
 On A8XX, this binning pass uses **CP_SET_MARKER** (opcode 0x65) to delimit
 binning vs. rendering phases.
 
-### LRZ: Late-Z Resolve
+### LRZ: Low Resolution Z
 
-**LRZ** (Late-Z Resolve) is a low-resolution depth buffer optimization.
-Before running the expensive fragment shader, the GPU does a fast depth test
-against a low-resolution Z buffer. If a fragment is known to be occluded
-(behind something already drawn), the fragment shader is skipped entirely.
+**LRZ** (Low Resolution Z) is a coarse early-depth-culling optimization.
+During the binning pass, the hardware builds a low-resolution depth map of
+the scene. Before the expensive fragment shader runs, the GPU tests against
+this low-res Z buffer — if a fragment is known to be occluded (behind
+something already drawn), the fragment shader is skipped entirely.
+
+**Not to be confused with Late-Z**, which is the standard fallback when a
+fragment shader modifies `gl_FragDepth` or uses `discard`. Late-Z forces the
+hardware to write depth *after* the shader executes, losing the early-reject
+optimization. LRZ is an early, approximate culling pass; Late-Z is a
+correctness fallback for shaders that touch depth.
 
 LRZ is configured per-draw via 15 register writes to the `0x81xx` block:
 - `GRAS_LRZ_CNTL` — enable/disable LRZ for this draw
@@ -451,7 +458,7 @@ fragment shader) and primitive output routing.
   PKT4 reg=0x9252 cnt=4   VPC_*
 ```
 
-#### LRZ Block (0x81xx) — 15 writes: Late-Z Resolve
+#### LRZ Block (0x81xx) — 15 writes: Low Resolution Z
 
 ```
   PKT4 reg=0x8102 cnt=1   GRAS_LRZ_MRT_BUFFER_INFO_0
@@ -611,11 +618,11 @@ When the CP processes a PKT4 packet:
   CP writes 0x00000000 to internal shadow register 0x8818
 ```
 
-The GPU has a **shadow register file** — a bank of registers that mirrors
-the hardware state. Writes go to the shadow, not directly to the pipeline.
-The hardware state is updated from the shadow at specific synchronization
-points (draw launch, event write, etc.). This allows the CP to batch
-register writes without stalling the rendering pipeline.
+The GPU has a **hardware context bank (shadow register file)** — a bank
+of registers that mirrors the hardware state. The CP parses the PKT4 stream
+and updates these banks asynchronously. The state is only **latched** into
+the actual execution pipeline at specific trigger points (notably
+`CP_DRAW_INDX_OFFSET`), allowing the CP to run ahead of the Shader Processors.
 
 ### 6.2 State Loading Phase (CP_SET_DRAW_STATE)
 
@@ -669,12 +676,16 @@ synchronization.
     Computes edge equations for rasterization
 
   CP → GRAS (Rasterizer):
-    Transforms triangle to screen coordinates (~256×256 viewport):
-      Vertex 0: (128, 192) — bottom center
+    Transforms triangle to screen coordinates (256×256 viewport):
+      Vertex 0: (128, 192) — bottom center  (y is inverted in NDC)
       Vertex 1: (192, 64)  — right
       Vertex 2: (64,  64)  — left
+    Triangle dimensions:
+      Base  = 192 - 64  = 128 pixels
+      Height = 192 - 64 = 128 pixels
+      Area  = ½ × 128 × 128 = 8,192 fragments
     Scan-converts: finds all pixels inside the triangle
-    ~256 fragments generated (half the tile area)
+    8,192 fragments generated (12.5% of the tile)
 
   CP → SP (Fragment Shader) × ~256:
     For each fragment:
@@ -764,16 +775,17 @@ gen8-specific additions. The same `tu_cs_emit_pkt7` function emits packets for
 all generations, with the driver using `if (CHIP >= A8XX)` conditionals to
 include gen8-specific opcodes.
 
-### 7.4 The LRZ Subsystem
+### 7.4 Blind LRZ Emission
 
 ```
   15 PKT4 writes to 0x81xx (GRAS_LRZ_*) per draw
 ```
 
-Even with no depth buffer, the LRZ block is fully configured. This suggests
-that `tu6_emit_lrz()` always emits the full LRZ state, even when LRZ is not
-used. A potential optimization: skip LRZ emission when the pipeline has no
-depth attachment.
+Even with no depth attachment, the LRZ block is fully configured with zero
+values. Turnip initializes state to default/zero to prevent dirty-state leakage
+between command buffers, but unconditionally writing full LRZ configuration
+for a color-only pass is wasted command processor bandwidth. A potential
+optimization: skip LRZ emission when the pipeline has no depth attachment.
 
 ### 7.5 Register Write Redundancy
 
@@ -785,13 +797,15 @@ depth attachment.
 
 Some registers are written with the same value every time they appear. The
 reg-cache catches 2 of these. The remaining 10 redundant writes happen across
-`tu_cs_reset()` boundaries, which correctly invalidate the cache. The reset
-invalidation is **correct behavior** — you cannot trust that GPU state persists
-across a command buffer reset, because the hardware context may have changed.
+`tu_cs_reset()` boundaries, which correctly invalidate the cache — you cannot
+trust that GPU state persists across a command buffer reset.
 
-However, within a single draw setup (no resets), the reg-cache can catch
-back-to-back writes of the same register. The 2 skips we observed are exactly
-those.
+The redundant HLSQ writes within a single draw are likely artifacts of Turnip's
+state-group emission logic: VS state and FS state both independently touch
+the same HLSQ enable register. When multiple state groups share a dirty flag
+for the same physical register, the register gets written once per group even
+though its value hasn't changed. A unified HLSQ dirty mask would collapse
+these into a single write.
 
 ---
 
