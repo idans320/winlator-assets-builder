@@ -1,0 +1,64 @@
+{
+  "total_pkts": 501,
+  "total_writes": 453,
+  "unique_regs": 188,
+  "draws": 0,
+  "barriers": 0,
+  "barrier_per_draw": 0.0,
+  "top_registers": [
+    {
+      "reg": "0xB182",
+      "writes": 12
+    },
+    {
+      "reg": "0x8818",
+      "writes": 11
+    },
+    {
+      "reg": "0xB183",
+      "writes": 11
+    },
+    {
+      "reg": "0x8213",
+      "writes": 6
+    },
+    {
+      "reg": "0xA9CB",
+      "writes": 6
+    },
+    {
+      "reg": "0x8228",
+      "writes": 6
+    },
+    {
+      "reg": "0x8229",
+      "writes": 6
+    },
+    {
+      "reg": "0x822A",
+      "writes": 6
+    },
+    {
+      "reg": "0x822B",
+      "writes": 6
+    },
+    {
+      "reg": "0x822C",
+      "writes": 6
+    }
+  ],
+  "top_emitters": [
+    {
+      "func": "tu_cs_emit_pkt4",
+      "writes": 366,
+      "unique_regs": 188,
+      "top_reg": "0x8213"
+    },
+    {
+      "func": "tu_cs_emit_write_reg",
+      "writes": 87,
+      "unique_regs": 26,
+      "top_reg": "0x8818"
+    }
+  ]
+}
