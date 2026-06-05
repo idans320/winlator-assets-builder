@@ -676,10 +676,12 @@ synchronization.
     Computes edge equations for rasterization
 
   CP → GRAS (Rasterizer):
+    Vulkan's default coordinate system: Y points *down*.
+    y = -0.5 maps to the top of the viewport (y = 64).
     Transforms triangle to screen coordinates (256×256 viewport):
-      Vertex 0: (128, 192) — bottom center  (y is inverted in NDC)
-      Vertex 1: (192, 64)  — right
-      Vertex 2: (64,  64)  — left
+      Vertex 0: (128, 64)  — top center   (y = -0.5 → viewport top)
+      Vertex 1: (192, 192) — bottom right (y =  0.5 → viewport bottom)
+      Vertex 2: (64,  192) — bottom left  (triangle points up)
     Triangle dimensions:
       Base  = 192 - 64  = 128 pixels
       Height = 192 - 64 = 128 pixels
@@ -687,7 +689,7 @@ synchronization.
     Scan-converts: finds all pixels inside the triangle
     8,192 fragments generated (12.5% of the tile)
 
-  CP → SP (Fragment Shader) × ~256:
+  CP → SP (Fragment Shader) × 8,192:
     For each fragment:
       Interpolate varyings (none in our shader)
       Run fragment shader: outColor = vec4(1,0,0,1)
