@@ -1,0 +1,29 @@
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index daeef60..ca1bd22 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -8294,6 +8294,13 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
+       tu_cs_emit(cs, subdraw_size);
+    }
+ 
++   /* Skip LRZ emission entirely when there is no depth/stencil attachment.
++    * The LRZ (Low Resolution Z) subsystem is only useful for early depth
++    * culling.  Unconditionally emitting 15 LRZ register writes for color-only
++    * passes wastes CP bandwidth — trace archaeology shows 15 PKT4 writes
++    * to 0x81xx per draw even with VK_FORMAT_UNDEFINED depth.
++    */
++   bool has_ds_attachment =
++      cmd->state.subpass->depth_stencil_attachment.attachment != VK_ATTACHMENT_UNUSED;
++
+    bool dirty_lrz =
+       (dirty & TU_CMD_DIRTY_LRZ) ||
+       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+@@ -8316,6 +8323,7 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
+       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+                   MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+ 
+-   if (dirty_lrz) {
++   if (dirty_lrz && has_ds_attachment) {
+       struct tu_cs cs;
+       uint32_t size = 8 +
+                       (cmd->device->physical_device->info->props.lrz_track_quirk ? 2 : 0) +

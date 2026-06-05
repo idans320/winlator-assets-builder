@@ -2,16 +2,26 @@ diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd
 index daeef60..ca1bd22 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
-@@ -483,6 +483,16 @@ tu_emit_cache_flush(struct tu_cmd_buffer *cmd_buffer)
+@@ -483,6 +483,24 @@ tu_emit_cache_flush(struct tu_cmd_buffer *cmd_buffer)
  {
     struct tu_cs *cs = &cmd_buffer->cs;
     struct tu_cache_state *cache = &cmd_buffer->state.cache;
 +
 +   /* Early-return: if no flush bits are accumulated, skip the entire
-+    * emission pipeline.  tu_add_cb_barrier_info accumulates bits lazily;
-+    * when zero, emitting WFI + WAIT_FOR_ME + EVENT_WRITE sequences wastes
-+    * CPU for zero effect.  Fuzz analysis: barrier_per_draw pattern found
-+    * in 208/207 cases — ~2-5% CPU savings with this simple check.
++    * emission pipeline.  This targets the non-renderpass flush path
++    * (e.g. pipeline barriers, end-of-renderpass resolve barriers).
++    *
++    * The renderpass flush path (tu_emit_cache_flush_renderpass, line 561)
++    * already has its own early-return, but during active rendering the
++    * flush_bits are typically non-zero because render pass setup and
++    * pipeline binding set cache-clean bits.  Those bits must be respected
++    * — the optimization there is to avoid SETTING the bits unnecessarily,
++    * not to skip the flush function.
++    *
++    * Trace archaeology on Adreno 830: tu_emit_cache_flush_renderpass
++    * emits 16 CP_EVENT_WRITE per draw in a simple triangle render pass.
++    * The flush_bits are non-zero because tu_cmd_render_sysmem and
++    * tu_cs_emit_draw_state set CCU_COLOR_CLEAN and CACHE_INVALIDATE bits.
 +    */
 +   if (!cache->flush_bits && likely(!tu_env.debug))
 +      return;

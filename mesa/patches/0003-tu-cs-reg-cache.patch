@@ -7,7 +7,7 @@ index 47e1939..2d0f12d 100644
     cs->next_bo_size = initial_size;
     cs->name = name;
 +
-+   /* Initialize shadow register cache for gen8+.  256-entry hash table
++   /* Initialize shadow register cache for gen8+. 512-slot flat hash table
 +    * catches redundant PKT4 writes in blit/clear/draw paths.
 +    */
 +   if (device->physical_device->info->chip >= A8XX) {
@@ -20,7 +20,22 @@ index 47e1939..2d0f12d 100644
  }
  
  /**
-@@ -96,6 +107,8 @@ tu_cs_finish(struct tu_cs *cs)
+@@ -57,6 +68,14 @@ tu_cs_reset(struct tu_cs *cs)
+    cs->entry_start_offset = 0;
+    cs->entry_size_in_dwords = 0;
+    cs->cond_stack_depth = 0;
++
++   /* Invalidate regcache: any reset path (secondary CS reuse, grow, error
++    * recovery) must flush cached register state — the GPU state may have
++    * changed since the last write.
++    */
++   if (cs->regcache.enabled) {
++      memset(cs->regcache.keys, 0, cs->regcache.mask * sizeof(uint32_t));
++   }
+ }
+ 
+ static struct tu_bo *
+@@ -96,6 +115,8 @@ tu_cs_finish(struct tu_cs *cs)
     free(cs->entries);
     free(cs->read_only.bos);
     free(cs->read_write.bos);
@@ -38,7 +53,8 @@ index 6a66de1..39aa5ad 100644
     uint64_t external_iova;
  
 +   /* Shadow register cache for PKT4 writes.  Enabled on gen8+ to skip
-+    * redundant register writes.  4KB flat hash table for 256 entries.
++    * redundant register writes.  512-slot flat open-addressing hash table
++    * with 8-entry probe limit.
 +    */
 +   struct {
 +      uint32_t    *keys;
@@ -50,18 +66,20 @@ index 6a66de1..39aa5ad 100644
     /* state for cond_exec_start/cond_exec_end */
     uint32_t cond_stack_depth;
     uint32_t cond_flags[TU_COND_EXEC_STACK_SIZE];
-@@ -370,6 +380,31 @@ tu_cs_emit_qw(struct tu_cs *cs, uint64_t value)
+@@ -370,6 +380,33 @@ tu_cs_emit_qw(struct tu_cs *cs, uint64_t value)
  static inline void
  tu_cs_emit_write_reg(struct tu_cs *cs, uint16_t reg, uint32_t value)
  {
 +   /* Shadow register cache: skip if value unchanged since last write.
-+    * Update cache with the new value after emitting.
++    * Key is reg+1 so that 0 can serve as the empty-slot sentinel,
++    * avoiding a collision with register offset 0.
 +    */
 +   if (cs->regcache.enabled) {
-+      uint32_t idx = reg & cs->regcache.mask;
++      uint32_t key = (uint32_t)reg + 1;
++      uint32_t idx = key & cs->regcache.mask;
 +      for (uint32_t i = 0; i < 8; i++) {
 +         uint32_t probe = (idx + i) & cs->regcache.mask;
-+         if (cs->regcache.keys[probe] == reg) {
++         if (cs->regcache.keys[probe] == key) {
 +            if (cs->regcache.values[probe] == value)
 +               return; /* skip — cached value matches */
 +            cs->regcache.values[probe] = value;
@@ -72,7 +90,7 @@ index 6a66de1..39aa5ad 100644
 +      for (uint32_t i = 0; i < 8; i++) {
 +         uint32_t probe = (idx + i) & cs->regcache.mask;
 +         if (cs->regcache.keys[probe] == 0) {
-+            cs->regcache.keys[probe] = reg;
++            cs->regcache.keys[probe] = key;
 +            cs->regcache.values[probe] = value;
 +            break;
 +         }
