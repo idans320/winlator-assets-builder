@@ -90,29 +90,37 @@ const (
 	CCH_FAST_CLEAR_CLEAN              = 0x1b // A8XX-
 )
 
-// PKT4 / PKT7 header helpers
+// PKT4 / PKT7 header builders and field extractors.
+// Header layouts match freedreno_pm4.h:
+//   PKT4: count[0:6] parity[7] reg[8:25] parity[27] type4[28:31]
+//   PKT7: count[0:13] parity[15] opcode[16:22] parity[23] type7[28:31]
+
 func Pkt4Header(reg uint16, count uint16) uint32 {
-	return Type4Mask | (uint32(reg) & 0x3ffff) | ((uint32(count) & 0x3f) << 24)
+	c := uint32(count)
+	r := uint32(reg)
+	return Type4Mask | c | (CalcParity(c) << 7) | ((r & 0x3ffff) << 8) | (CalcParity(r) << 27)
 }
 
 func Pkt7Header(opcode uint32, count uint16) uint32 {
-	return Type7Mask | ((opcode & 0x7f) << 23) | (uint32(count) & 0x7fff)
+	c := uint32(count)
+	o := opcode & 0x7f
+	return Type7Mask | c | (CalcParity(c) << 15) | (o << 16) | (CalcParity(o) << 23)
 }
 
 func Pkt4Reg(header uint32) uint16 {
-	return uint16(header & 0x3ffff)
+	return uint16((header >> 8) & 0x3ffff)
 }
 
 func Pkt4Count(header uint32) uint16 {
-	return uint16((header >> 24) & 0x3f)
+	return uint16(header & 0x7F)
 }
 
 func Pkt7Opcode(header uint32) uint32 {
-	return (header >> 23) & 0x7f
+	return (header >> 16) & 0x7f
 }
 
 func Pkt7Count(header uint32) uint16 {
-	return uint16(header & 0x7fff)
+	return uint16(header & 0x3FFF)
 }
 
 // Opcode name map for human-readable logging.

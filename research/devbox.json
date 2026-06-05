@@ -3,7 +3,10 @@
   "packages": [
     "go@1.22",
     "graphviz",
-    "clang@17"
+    "clang@17",
+    "ripgrep",
+    "universal-ctags",
+    "python3"
   ],
   "env": {
     "MESA_SRC": "$PWD/../mesa/workdir/mesa"
@@ -11,17 +14,18 @@
   "shell": {
     "init_hook": [
       "export MESA_SRC=\"$PWD/../mesa/workdir/mesa\"",
-      "mkdir -p output",
-      "echo 'Turnip gen8 AST analysis environment ready'",
+      "mkdir -p output output/traces output/diffs",
+      "echo 'Turnip gen8 Laboratory ready'",
       "echo '  Mesa source: $MESA_SRC'",
-      "echo '  Run: go run ./cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json'",
-      "echo '  Run: go run ./cmd/graph-gen --input output/analysis.json --outdir output/'"
+      "echo '  Index:        scripts/index-functions.sh'",
+      "echo '  Search gen8:  scripts/search-gen8.sh'",
+      "echo '  Build index:  go run ./cmd/index-builder --mesa $MESA_SRC'",
+      "echo '  Build graph:  go run ./cmd/graph-builder --input output/index.json'"
     ],
     "scripts": {
-      "analyze": "go run ./analysis/cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json",
-      "graph": "go run ./analysis/cmd/graph-gen --input output/analysis.json --outdir output/",
-      "all": "go run ./analysis/cmd/ast-analyzer --mesa $MESA_SRC --out output/analysis.json && go run ./analysis/cmd/graph-gen --input output/analysis.json --outdir output/ && echo Done! Diagrams in output/",
-      "fuzz": "go run ./gpu-stub/cmd/gpu-fuzz --input output/analysis.json"
+      "index": "go run ./cmd/index-builder --mesa $MESA_SRC --out output/index.json",
+      "graph": "go run ./cmd/graph-builder --input output/index.json --outdir output/",
+      "all": "go run ./cmd/index-builder --mesa $MESA_SRC --out output/index.json && go run ./cmd/graph-builder --input output/index.json --outdir output/ && echo Done! Diagrams in output/"
     }
   }
 }

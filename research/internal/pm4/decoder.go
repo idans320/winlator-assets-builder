@@ -119,9 +119,10 @@ func DecodeEntry(dwords []uint32, name string) (*SubmissionEntry, *DecodeStats) 
 }
 
 type SubmissionEntry struct {
-	Name    string       `json:"name"`
-	Dwords  []uint32     `json:"dwords"`
-	Packets []PM4Packet  `json:"packets"`
+	Name          string       `json:"name"`
+	Dwords        []uint32     `json:"dwords"`
+	Packets       []PM4Packet  `json:"packets"`
+	IsFp16Compute bool         `json:"is_fp16_compute,omitempty"`
 }
 
 func (e *SubmissionEntry) Size() int { return len(e.Dwords) * 4 }
@@ -224,13 +225,16 @@ func safeSlice(dwords []uint32, start, count int) []uint32 {
 	return dwords[start:end]
 }
 
-func parityCheck(val uint32, expectedBit uint32) bool {
+func CalcParity(val uint32) uint32 {
 	val ^= val >> 16
 	val ^= val >> 8
 	val ^= val >> 4
 	val &= 0xf
-	actual := (uint32(0x9669) >> val) & 1
-	return actual == expectedBit
+	return (uint32(0x9669) >> val) & 1
+}
+
+func parityCheck(val uint32, expectedBit uint32) bool {
+	return CalcParity(val) == expectedBit
 }
 
 func (p PM4Packet) String() string {

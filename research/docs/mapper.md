@@ -298,19 +298,15 @@ packets — matching exactly what the Adreno CP hardware validates.
 
 ## Limitations
 
-1. **Inline functions are invisible** — `tu_cs_emit`, `tu_cs_emit_pkt4`, `tu_cs_emit_pkt7`,
-   `tu_cs_emit_write_reg` are all `static inline` in `tu_cs.h`. They're compiled into
-   callers and have no symbol entry. The call graph can't trace through them directly.
+1. **Regex parsing cannot fully resolve C++** — The old regex-based parser
+   (`funcDefRe`, `findClosingBrace`) produced ~3,550 fuzzy "gen8 sites" with
+   false positives and missed sites. Inline functions in headers and template
+   instantiations are not reliably traced. The new pipeline uses native tools
+   (ctags, ripgrep, tree-sitter) to build accurate call graphs from real parse
+   trees, not regex heuristics.
 
-2. **Template instantiations** — Turnip heavily uses `template<chip CHIP>` with
-   `CHIP >= A8XX` specializations. The regex sees the template pattern but doesn't
-   resolve which instantiation is used at runtime. We flag the template site as gen8
-   based on the conditional pattern.
-
-3. **Cross-file call resolution** — Without a C++ preprocessor, calls to functions
-   defined in other translation units require the two-pass merge strategy. Some
-   indirect calls (through function pointers in `tu_knl`) are missed.
-
-4. **No actual PM4 data from source** — The static analysis tells us which functions
-   emit PM4, but the actual register values and opcode sequences come from runtime
-   or from synthetic workload generation in `cmd/stim-test`.
+2. **No actual PM4 data from static analysis** — The static analysis tells us
+   which functions MAY emit PM4, but the actual register values and opcode
+   sequences come only from real hardware traces. The new pipeline replaces
+   synthetic workload generation with `TU_DEBUG=trace` captures from physical
+   Adreno 8xx devices.

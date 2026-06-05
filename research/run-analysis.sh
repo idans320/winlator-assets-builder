@@ -1,7 +1,5 @@
 #!/bin/bash
-# Turnip gen8 (Adreno 8xx) AST Analysis & Graphviz Pipeline
-# Run inside devbox for hermetic Go + Graphviz environment
-set -e
+set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MESA_SRC="${MESA_SRC:-$DIR/../mesa/workdir/mesa}"
@@ -11,31 +9,34 @@ for arg in "$@"; do
     case "$arg" in
         --mesa=*) MESA_SRC="${arg#*=}" ;;
         --outdir=*) OUTDIR="${arg#*=}" ;;
-        --clean) rm -rf "$OUTDIR"/*.dot "$OUTDIR"/*.svg "$OUTDIR"/*.json; echo "Cleaned $OUTDIR"; exit 0 ;;
+        --clean) rm -rf "$OUTDIR"/*.dot "$OUTDIR"/*.svg "$OUTDIR"/*.json "$OUTDIR"/traces "$OUTDIR"/diffs
+                 mkdir -p "$OUTDIR" "$OUTDIR/traces" "$OUTDIR/diffs"
+                 echo "Cleaned $OUTDIR"; exit 0 ;;
     esac
 done
 
-if [ -n "$DEVBOX_SHELL" ]; then
-    echo "=== Turnip gen8 Neuron Tracer & Graphviz Pipeline ==="
+if [ -n "${DEVBOX_SHELL:-}" ] || command -v go &>/dev/null; then
+    echo "=== Turnip Gen8 Laboratory ==="
     echo "Mesa:  $MESA_SRC"
     echo "Out:   $OUTDIR"
     echo ""
 
-    mkdir -p "$OUTDIR"
+    mkdir -p "$OUTDIR" "$OUTDIR/traces" "$OUTDIR/diffs"
 
-    echo "[1/3] AST Analysis - extracting gen8 code paths..."
-    go run ./analysis/cmd/ast-analyzer --mesa "$MESA_SRC" --out "$OUTDIR/analysis.json"
+    echo "[1/4] Static index (ctags + ripgrep)..."
+    bash "$DIR/scripts/index-functions.sh" "$MESA_SRC" "$OUTDIR/ctags_index.json"
+    bash "$DIR/scripts/search-gen8.sh" "$MESA_SRC" "$OUTDIR/gen8_sites.json"
     echo ""
 
-    echo "[2/3] Bottleneck discovery..."
-    go run ./analysis/cmd/analyze-bottleneck --input "$OUTDIR/analysis.json"
+    echo "[2/4] Building Turnip index..."
+    go run ./cmd/index-builder --ctags "$OUTDIR/ctags_index.json" --gen8 "$OUTDIR/gen8_sites.json" --out "$OUTDIR/index.json"
     echo ""
 
-    echo "[3/3] Generating Graphviz DOT diagrams..."
-    go run ./analysis/cmd/graph-gen --input "$OUTDIR/analysis.json" --outdir "$OUTDIR/"
+    echo "[3/4] Generating Graphviz DOT diagrams..."
+    go run ./cmd/graph-builder --input "$OUTDIR/index.json" --outdir "$OUTDIR/"
     echo ""
 
-    echo "[render] Rendering DOT -> SVG (parallel sfdp)..."
+    echo "[4/4] Rendering DOT -> SVG..."
     for f in "$OUTDIR"/*.dot; do
         base="$(basename "$f" .dot)"
         (sfdp -Tsvg -Goverlap=false -Gsplines=true "$f" -o "$OUTDIR/$base.svg" 2>/dev/null && echo "  ok $base.svg") &
@@ -49,10 +50,9 @@ if [ -n "$DEVBOX_SHELL" ]; then
     ls -lh "$OUTDIR"/*.svg 2>/dev/null | awk '{printf "  %s  %s\n", $5, $NF}'
 elif command -v devbox &>/dev/null; then
     echo "Launching via devbox..."
-    cd "$DIR"
     exec devbox run -- bash "$0" "$@"
 else
-    echo "Error: devbox not found. Install from https://jetify.com/devbox"
-    echo "Running directly..."
-    bash "$0" "$@"
+    echo "Error: devbox not found and no Go in PATH."
+    echo "Install from https://jetify.com/devbox or install Go >=1.22."
+    exit 1
 fi

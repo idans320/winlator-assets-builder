@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/idans/winlator-cmod-builder/research/internal/ast"
 )
 
 type DotGen struct {
@@ -18,35 +16,32 @@ func NewDotGen(outDir string) *DotGen {
 	return &DotGen{OutDir: outDir}
 }
 
-func (d *DotGen) Generate(cg *ast.CallGraph) error {
-	traced := cg.TraceBackFromGen8()
-
-	paths := []string{}
-	for _, name := range []string{"01_turnip_gen8_architecture", "02_gen8_neuron_paths", "03_call_graph_focused"} {
-		p, err := d.writeDOT(name, cg, traced)
+func (d *DotGen) Generate(ig *IndexGraph) error {
+	names := []string{"01_turnip_gen8_architecture", "02_gen8_neuron_paths", "03_call_graph_focused"}
+	var paths []string
+	for _, name := range names {
+		p, err := d.writeDOT(name, ig)
 		if err != nil {
 			return err
 		}
 		paths = append(paths, p)
 	}
-
 	for _, p := range paths {
 		fmt.Printf("  Wrote %s\n", filepath.Base(p))
 	}
 	return nil
 }
 
-func (d *DotGen) writeDOT(name string, cg *ast.CallGraph, tg *ast.TracedGraph) (string, error) {
+func (d *DotGen) writeDOT(name string, ig *IndexGraph) (string, error) {
 	var dot string
 	switch name {
 	case "01_turnip_gen8_architecture":
-		dot = d.architectureDOT(cg)
+		dot = d.architectureDOT()
 	case "02_gen8_neuron_paths":
-		dot = d.neuronPathsDOT(cg, tg)
+		dot = d.neuronPathsDOT(ig)
 	case "03_call_graph_focused":
-		dot = d.focusedCallGraphDOT(cg, tg)
+		dot = d.focusedCallGraphDOT(ig)
 	}
-
 	path := filepath.Join(d.OutDir, name+".dot")
 	if err := os.WriteFile(path, []byte(dot), 0644); err != nil {
 		return "", err
@@ -54,12 +49,12 @@ func (d *DotGen) writeDOT(name string, cg *ast.CallGraph, tg *ast.TracedGraph) (
 	return path, nil
 }
 
-func (d *DotGen) architectureDOT(cg *ast.CallGraph) string {
+func (d *DotGen) architectureDOT() string {
 	return `digraph Architecture {
 	rankdir=TB
 	bgcolor="#0d1117"
 	fontname="monospace"
-	label="Turnip Adreno 8xx (gen8) Driver Architecture\nVulkan API → GPU Register Data Flow"
+	label="Turnip Adreno 8xx (gen8) Driver Architecture\nVulkan API to GPU Register Data Flow"
 	fontsize=20 fontcolor="#e6edf3"
 	labelloc="t"
 	nodesep=0.4 ranksep=0.6
@@ -72,7 +67,7 @@ func (d *DotGen) architectureDOT(cg *ast.CallGraph) string {
 		fontcolor="#58a6ff" fontsize=14
 		bgcolor="#161b22" color="#58a6ff"
 		node [fillcolor="#1f2937" color="#58a6ff" fontcolor="#e6edf3"]
-		vk_api [label=<<TABLE BORDER="0"><TR><TD><B>Vulkan API Commands</B></TD></TR><TR><TD>vkCmdDraw / vkCmdDispatch</TD></TR><TR><TD>vkCmdPipelineBarrier</TD></TR><TR><TD>vkCmdBeginRenderPass</TD></TR><TR><TD>vkCmdClearAttachments</TD></TR><TR><TD>vkCmdBlitImage / CopyImage</TD></TR><TR><TD>vkCreateGraphicsPipelines</TD></TR><TR><TD>vkCreateDevice / Queue</TD></TR></TABLE>>]
+		vk_api [label=<<TABLE BORDER="0"><TR><TD><B>Vulkan API Commands</B></TD></TR><TR><TD>vkCmdDraw / vkCmdDispatch</TD></TR><TR><TD>vkCmdPipelineBarrier</TD></TR><TR><TD>vkCmdBeginRenderPass</TD></TR><TR><TD>vkCmdClearAttachments</TD></TR><TR><TD>vkCmdBlitImage / CopyImage</TD></TR><TR><TD>vkCreateGraphicsPipelines</TD></TR></TABLE>>]
 	}
 
 	subgraph cluster_turnip {
@@ -128,22 +123,19 @@ func (d *DotGen) architectureDOT(cg *ast.CallGraph) string {
 	}
 
 	subgraph cluster_gen8 {
-		label="Adreno 8xx (gen8) Features"
+		label="Adreno 8xx Features"
 		fontcolor="#ff7b72" fontsize=14
 		bgcolor="#161b22" color="#ff7b72"
 		style=dashed
 		node [fillcolor="#3a1a1a" color="#ff7b72" fontcolor="#ffd2cc"]
-
 		g_marker [label="A8XX_CP_SET_MARKER"]
-		g_byteaddr [label="Byte-addressed Buffer Descriptors"]
-		g_tess [label="Tess BO ×2 Sized"]
+		g_byteaddr [label="Byte-addressed Descriptors"]
+		g_tess [label="Tess BO x2"]
 		g_depth [label="Depth [0,1] Clamp"]
-		g_combiner [label="FSR Combiner CLAMP_16_SAMP"]
-		g_perfcntr [label="Perfcntr Kernel UAPI"]
-		g_binpass [label="Binning Pass (KMD regs)"]
+		g_combiner [label="FSR Combiner"]
+		g_binpass [label="Binning Pass"]
 		g_memobj [label="A8XX TEX_MEMOBJ"]
 		g_samp [label="A8XX TEX_SAMP"]
-		g_lrz [label="LRZ Changes"]
 	}
 
 	subgraph cluster_gpu {
@@ -189,8 +181,6 @@ func (d *DotGen) architectureDOT(cg *ast.CallGraph) string {
 	clear_blit -> g_memobj [color="#ff7b72" style=dashed]
 	descriptor -> g_memobj [color="#ff7b72" style=dashed]
 	sampler -> g_samp [color="#ff7b72" style=dashed]
-	device -> g_perfcntr [color="#ff7b72" style=dashed]
-	lrz -> g_lrz [color="#ff7b72" style=dashed]
 	shader -> g_byteaddr [color="#ff7b72" style=dashed]
 
 	g_marker -> adreno_gpu [color="#ff7b72" style=dashed]
@@ -202,13 +192,13 @@ func (d *DotGen) architectureDOT(cg *ast.CallGraph) string {
 `
 }
 
-func (d *DotGen) neuronPathsDOT(cg *ast.CallGraph, tg *ast.TracedGraph) string {
+func (d *DotGen) neuronPathsDOT(ig *IndexGraph) string {
 	var sb strings.Builder
 	sb.WriteString(`digraph NeuronPaths {
 	rankdir=LR
 	bgcolor="#0d1117"
 	fontname="monospace"
-	label="Gen8 Neuron Paths\nEntry Points → Gen8 Terminal Code Sites"
+	label="Gen8 Neuron Paths\nEntry Points to Gen8 Terminal Code Sites"
 	fontsize=18 fontcolor="#ff7b72"
 	labelloc="t"
 	nodesep=0.3 ranksep=0.5
@@ -217,14 +207,14 @@ func (d *DotGen) neuronPathsDOT(cg *ast.CallGraph, tg *ast.TracedGraph) string {
 
 `)
 
-	edgeCount := 0
-	maxEdges := 300
+	maxNodes := 150
+	count := 0
 
-	for _, gn := range cg.Gen8Nodes {
-		if edgeCount >= maxEdges {
+	for _, gn := range ig.Gen8Nodes {
+		if count >= maxNodes {
 			break
 		}
-		fn := cg.Functions[gn.Function]
+		fn := ig.Functions[gn.Function]
 		if fn == nil {
 			continue
 		}
@@ -243,14 +233,10 @@ func (d *DotGen) neuronPathsDOT(cg *ast.CallGraph, tg *ast.TracedGraph) string {
 			funcID, truncate(gn.Function, 35)))
 
 		sb.WriteString(fmt.Sprintf(`	%s -> %s [color="#ff7b72" style=bold]`+"\n", funcID, gnID))
-		edgeCount++
 
-		for _, caller := range findCallers(cg, gn.Function) {
-			if edgeCount >= maxEdges {
-				break
-			}
+		for _, caller := range findCallers(ig, gn.Function) {
 			callerID := sanitize("fn_" + caller)
-			cfn := cg.Functions[caller]
+			cfn := ig.Functions[caller]
 			callerFill := "#1a2e1a"
 			callerBorder := "#3fb950"
 			callerColor := "#d2f8d2"
@@ -262,15 +248,15 @@ func (d *DotGen) neuronPathsDOT(cg *ast.CallGraph, tg *ast.TracedGraph) string {
 			sb.WriteString(fmt.Sprintf(`	%s [label="%s()" fillcolor="%s" color="%s" fontcolor="%s" fontsize=7]`+"\n",
 				callerID, truncate(caller, 35), callerFill, callerBorder, callerColor))
 			sb.WriteString(fmt.Sprintf(`	%s -> %s [color="#3fb950" arrowsize=0.7]`+"\n", callerID, funcID))
-			edgeCount++
 		}
+		count++
 	}
 
 	sb.WriteString("}\n")
 	return sb.String()
 }
 
-func (d *DotGen) focusedCallGraphDOT(cg *ast.CallGraph, tg *ast.TracedGraph) string {
+func (d *DotGen) focusedCallGraphDOT(ig *IndexGraph) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`digraph FocusedCallGraph {
 	rankdir=TB
@@ -283,23 +269,23 @@ func (d *DotGen) focusedCallGraphDOT(cg *ast.CallGraph, tg *ast.TracedGraph) str
 
 	node [fontname="monospace" fontsize=8 shape=box style="filled" penwidth=1]
 
-`, len(cg.Functions), len(cg.Gen8Nodes)))
-
-	edgeCount := 0
-	maxEdges := 1000
+`, len(ig.Functions), len(ig.Gen8Nodes)))
 
 	gen8Funcs := make(map[string]bool)
-	for _, gn := range cg.Gen8Nodes {
+	for _, gn := range ig.Gen8Nodes {
 		gen8Funcs[gn.Function] = true
 	}
 	for fnName := range gen8Funcs {
-		for _, caller := range findCallers(cg, fnName) {
+		for _, caller := range findCallers(ig, fnName) {
 			gen8Funcs[caller] = true
 		}
 	}
 
+	maxEdges := 1000
+	edgeCount := 0
+
 	for fnName := range gen8Funcs {
-		fn := cg.Functions[fnName]
+		fn := ig.Functions[fnName]
 		fillColor := "#1a2e1a"
 		borderColor := "#3fb950"
 		fontColor := "#d2f8d2"
@@ -332,7 +318,7 @@ func (d *DotGen) focusedCallGraphDOT(cg *ast.CallGraph, tg *ast.TracedGraph) str
 			}
 			color := "#30363d"
 			style := ""
-			if fn.Gen8Site || (cg.Functions[callee] != nil && cg.Functions[callee].Gen8Site) {
+			if fn.Gen8Site || (ig.Functions[callee] != nil && ig.Functions[callee].Gen8Site) {
 				color = "#ff7b72"
 				style = ` style=bold`
 			}
@@ -343,17 +329,17 @@ func (d *DotGen) focusedCallGraphDOT(cg *ast.CallGraph, tg *ast.TracedGraph) str
 	}
 
 	if edgeCount >= maxEdges {
-		sb.WriteString(fmt.Sprintf(`	note_max [label="... %d+ more edges (limited for rendering)" shape=note fillcolor="#3a1a1a" color="#ff7b72" fontcolor="#ffd2cc" fontsize=7]`+"\n", edgeCount-maxEdges))
+		sb.WriteString(fmt.Sprintf(`	note_max [label="... %d+ more edges" shape=note fillcolor="#3a1a1a" color="#ff7b72" fontcolor="#ffd2cc" fontsize=7]`+"\n", edgeCount-maxEdges))
 	}
 
 	sb.WriteString("}\n")
 	return sb.String()
 }
 
-func findCallers(cg *ast.CallGraph, funcName string) []string {
+func findCallers(ig *IndexGraph, funcName string) []string {
 	seen := make(map[string]bool)
 	var callers []string
-	for caller, callees := range cg.Edges {
+	for caller, callees := range ig.Edges {
 		for _, callee := range callees {
 			if callee == funcName {
 				if !seen[caller] {

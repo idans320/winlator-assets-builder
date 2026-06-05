@@ -4,29 +4,12 @@ import (
 	"testing"
 )
 
-// Build a PKT4 header using the same algorithm as freedreno_pm4.h:pm4_pkt4_hdr
 func buildPkt4(reg uint16, cnt uint16) uint32 {
-	hdr := Type4Mask | uint32(cnt) | (pm4OddParity(uint32(cnt)) << 7) |
-		((uint32(reg) & 0x3ffff) << 8) |
-		(pm4OddParity(uint32(reg)) << 27)
-	return hdr
+	return Pkt4Header(reg, cnt)
 }
 
-// Build a PKT7 header using the same algorithm as freedreno_pm4.h:pm4_pkt7_hdr
 func buildPkt7(opcode uint8, cnt uint16) uint32 {
-	hdr := Type7Mask | uint32(cnt) |
-		(pm4OddParity(uint32(cnt)) << 15) |
-		((uint32(opcode) & 0x7f) << 16) |
-		(pm4OddParity(uint32(opcode)) << 23)
-	return hdr
-}
-
-func pm4OddParity(val uint32) uint32 {
-	val ^= val >> 16
-	val ^= val >> 8
-	val ^= val >> 4
-	val &= 0xf
-	return (uint32(0x9669) >> val) & 1
+	return Pkt7Header(uint32(opcode), cnt)
 }
 
 func TestDecodePKT4(t *testing.T) {
