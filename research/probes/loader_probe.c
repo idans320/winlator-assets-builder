@@ -3,9 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "spirv_data.h"
+#include <math.h>
+#include "spirv_data.h"    /* original solid-color FS */
+#include "dxvk_spirv.h"    /* VS with push constant rotation */
 
 #define LOG(fmt,...) do{ fprintf(stderr, fmt "\n", ##__VA_ARGS__); fflush(stderr); }while(0)
+#define NUM_FRAMES 32
 
 int main(void) {
     setenv("TU_DEBUG", "trace", 1);
@@ -18,19 +21,17 @@ int main(void) {
         dlsym(icd, "vk_icdGetInstanceProcAddr");
     if (!gp) { LOG("no gp"); return 1; }
 
-    /* ---- instance ---- */
     PFN_vkCreateInstance ci = (PFN_vkCreateInstance)gp(NULL,"vkCreateInstance");
-    VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO,0,"tri",1,0,VK_API_VERSION_1_2};
+    VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO,0,"pushcache",1,0,VK_API_VERSION_1_2};
     VkInstanceCreateInfo ici = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,0,0,&ai,0,0,0,0};
     VkInstance inst=0;
     if (ci(&ici,0,&inst)||!inst) { LOG("ci fail"); return 1; }
-    LOG("instance OK");
 
     PFN_vkDestroyInstance di = (PFN_vkDestroyInstance)gp(inst,"vkDestroyInstance");
     PFN_vkEnumeratePhysicalDevices ed = (PFN_vkEnumeratePhysicalDevices)gp(inst,"vkEnumeratePhysicalDevices");
     PFN_vkGetPhysicalDeviceProperties gpp = (PFN_vkGetPhysicalDeviceProperties)gp(inst,"vkGetPhysicalDeviceProperties");
-    PFN_vkGetPhysicalDeviceQueueFamilyProperties gqf = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gp(inst,"vkGetPhysicalDeviceQueueFamilyProperties");
     PFN_vkGetPhysicalDeviceMemoryProperties gmp = (PFN_vkGetPhysicalDeviceMemoryProperties)gp(inst,"vkGetPhysicalDeviceMemoryProperties");
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties gqf = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gp(inst,"vkGetPhysicalDeviceQueueFamilyProperties");
     PFN_vkCreateDevice cd = (PFN_vkCreateDevice)gp(inst,"vkCreateDevice");
     PFN_vkDestroyDevice dd = (PFN_vkDestroyDevice)gp(inst,"vkDestroyDevice");
     PFN_vkGetDeviceQueue gq = (PFN_vkGetDeviceQueue)gp(inst,"vkGetDeviceQueue");
@@ -52,7 +53,6 @@ int main(void) {
     VkDevice dev=0;
     if (cd(pd,&dci,0,&dev)||!dev) { LOG("cd fail"); return 1; }
     VkQueue q; gq(dev,qf,0,&q);
-    LOG("device OK");
 
     /* ---- device functions ---- */
     PFN_vkCreateCommandPool ccp = (PFN_vkCreateCommandPool)gp(inst,"vkCreateCommandPool");
@@ -61,7 +61,6 @@ int main(void) {
     PFN_vkBeginCommandBuffer bcb = (PFN_vkBeginCommandBuffer)gp(inst,"vkBeginCommandBuffer");
     PFN_vkEndCommandBuffer ecb = (PFN_vkEndCommandBuffer)gp(inst,"vkEndCommandBuffer");
     PFN_vkQueueSubmit qs = (PFN_vkQueueSubmit)gp(inst,"vkQueueSubmit");
-    PFN_vkQueueWaitIdle qwi = (PFN_vkQueueWaitIdle)gp(inst,"vkQueueWaitIdle");
     PFN_vkResetCommandBuffer rcb = (PFN_vkResetCommandBuffer)gp(inst,"vkResetCommandBuffer");
 
     /* ---- pipeline ---- */
@@ -79,6 +78,7 @@ int main(void) {
     PFN_vkCmdDraw cdr = (PFN_vkCmdDraw)gp(inst,"vkCmdDraw");
     PFN_vkCmdSetViewport csv = (PFN_vkCmdSetViewport)gp(inst,"vkCmdSetViewport");
     PFN_vkCmdSetScissor css = (PFN_vkCmdSetScissor)gp(inst,"vkCmdSetScissor");
+    PFN_vkCmdPushConstants cpc = (PFN_vkCmdPushConstants)gp(inst,"vkCmdPushConstants");
 
     /* ---- framebuffer ---- */
     PFN_vkCreateImage cimg = (PFN_vkCreateImage)gp(inst,"vkCreateImage");
@@ -92,13 +92,17 @@ int main(void) {
     PFN_vkCreateFramebuffer cfb = (PFN_vkCreateFramebuffer)gp(inst,"vkCreateFramebuffer");
     PFN_vkDestroyFramebuffer dfb = (PFN_vkDestroyFramebuffer)gp(inst,"vkDestroyFramebuffer");
 
-    /* ---- shader modules ---- */
-    VkShaderModuleCreateInfo smci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,0,0,vs_spv_size,vs_spv};
+    /* ---- shader modules: push-constant VS + solid-color FS ---- */
+    VkShaderModuleCreateInfo smci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,0,0,dxvk_vs_spv_size,dxvk_vs_spv};
     VkShaderModule vs; csm(dev,&smci,0,&vs);
     smci.pCode=fs_spv; smci.codeSize=fs_spv_size;
     VkShaderModule fs; csm(dev,&smci,0,&fs);
 
-    /* ---- pipeline ---- */
+    /* ---- pipeline with push constant range (32 bytes = vec2 rot + vec2 off) ---- */
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_VERTEX_BIT, 0, 32};
+    VkPipelineLayoutCreateInfo plci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,0,0,0,0,1,&pcr};
+    VkPipelineLayout pl; cpl(dev,&plci,0,&pl);
+
     VkPipelineShaderStageCreateInfo stages[2] = {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,0,0,VK_SHADER_STAGE_VERTEX_BIT,vs,"main",0},
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,0,0,VK_SHADER_STAGE_FRAGMENT_BIT,fs,"main",0},
@@ -134,9 +138,6 @@ int main(void) {
     VkRenderPassCreateInfo rpci = {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,0,0,1,&att,1,&sp,0,0};
     VkRenderPass rp; crp(dev,&rpci,0,&rp);
 
-    VkPipelineLayoutCreateInfo plci = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    VkPipelineLayout pl; cpl(dev,&plci,0,&pl);
-
     VkGraphicsPipelineCreateInfo gpci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,0,0,2,stages,&vi,&ia,0,&vpi,&rs,&ms,0,&cb,0,pl,rp,0,0,0};
     VkPipeline pipe; cgp(dev,0,1,&gpci,0,&pipe);
     LOG("pipeline OK");
@@ -157,35 +158,66 @@ int main(void) {
     VkFramebuffer fb; cfb(dev,&fci,0,&fb);
     LOG("framebuffer OK");
 
-    /* ---- submit ---- */
+    /* ---- command buffer ---- */
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,0,0,qf};
-    VkCommandPool cp; ccp(dev,&cpi,0,&cp);
-    VkCommandBufferAllocateInfo cbai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,0,cp,VK_COMMAND_BUFFER_LEVEL_PRIMARY,1};
+    VkCommandPool cmdpool; ccp(dev,&cpi,0,&cmdpool);
+    VkCommandBufferAllocateInfo cbai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,0,cmdpool,VK_COMMAND_BUFFER_LEVEL_PRIMARY,1};
     VkCommandBuffer cmdbuf; acb(dev,&cbai,&cmdbuf);
 
-    VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,0,VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,0};
-    bcb(cmdbuf,&cbbi);
+    /* ---- Benchmark: N frames, push constants change every 8th frame ---- */
+    int push_emitted = 0, push_skipped = 0;
+    float angle = 0;
+    float pc_cache[8] = {0};
+    int pc_dirty = 1; // first frame always emits
 
-    VkClearValue clr = {{{0.0f,0.0f,0.0f,1.0f}}};
-    VkRenderPassBeginInfo rpbi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,0,rp,fb,{{0,0},{256,256}},1,&clr};
-    cbrp(cmdbuf,&rpbi,VK_SUBPASS_CONTENTS_INLINE);
-    csv(cmdbuf,0,1,&vp);
-    css(cmdbuf,0,1,&sc);
-    cbp(cmdbuf,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
-    LOG("vkCmdDraw...");
-    cdr(cmdbuf,3,1,0,0);
-    cerp(cmdbuf);
-    ecb(cmdbuf);
+    LOG("=== Push cache probe: %d frames, push update every 8 ===", NUM_FRAMES);
 
-    LOG("submitting...");
-    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO,0,0,0,0,1,&cmdbuf,0,0};
-    qs(q,1,&si,0);
-    qwi(q);
-    LOG("submit done");
+    for (int frame = 0; frame < NUM_FRAMES; frame++) {
+        rcb(cmdbuf,0);
+        VkCommandBufferBeginInfo cbbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,0,VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,0};
+        bcb(cmdbuf,&cbbi);
+
+        VkClearValue clr = {{{0.0f,0.0f,0.0f,1.0f}}};
+        VkRenderPassBeginInfo rpbi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,0,rp,fb,{{0,0},{256,256}},1,&clr};
+        cbrp(cmdbuf,&rpbi,VK_SUBPASS_CONTENTS_INLINE);
+        csv(cmdbuf,0,1,&vp);
+        css(cmdbuf,0,1,&sc);
+        cbp(cmdbuf,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
+
+        /* Update push constants every 8th frame; otherwise reuse cached */
+        if ((frame & 7) == 0) {
+            angle += 0.2f;
+            pc_cache[0] = cosf(angle);  pc_cache[1] = -sinf(angle);
+            pc_cache[2] = 0; pc_cache[3] = 0;
+            pc_cache[4] = sinf(angle);  pc_cache[5] = cosf(angle);
+            pc_cache[6] = 0; pc_cache[7] = 0;
+            pc_dirty = 1;
+        }
+
+        if (pc_dirty) {
+            cpc(cmdbuf,pl,VK_SHADER_STAGE_VERTEX_BIT,0,32,pc_cache);
+            push_emitted++;
+            pc_dirty = 0;
+        } else {
+            push_skipped++;
+            /* skip vkCmdPushConstants — DXVK cache would skip this too */
+        }
+
+        cdr(cmdbuf,3,1,0,0);
+        cerp(cmdbuf);
+        ecb(cmdbuf);
+
+        VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO,0,0,0,0,1,&cmdbuf,0,0};
+        qs(q,1,&si,0);
+        /* No fence — we want PM4 trace, not timing */
+    }
+
+    LOG("push emitted: %d  push skipped: %d  draws: %d",
+        push_emitted, push_skipped, NUM_FRAMES);
 
     /* ---- teardown ---- */
     rcb(cmdbuf,0);
-    dcp(dev,cp,0);
+    dcp(dev,cmdpool,0);
     dfb(dev,fb,0); div(dev,iv,0); dimg(dev,img,0); fm(dev,mem,0);
     dp(dev,pipe,0); dpl(dev,pl,0); drp(dev,rp,0);
     dsm(dev,vs,0); dsm(dev,fs,0);
