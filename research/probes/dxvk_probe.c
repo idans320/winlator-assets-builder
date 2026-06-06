@@ -33,7 +33,7 @@ static double now_ms(void) {
 
 /* vkCmd-level call counters */
 enum { C_begin_rp, C_end_rp, C_bind_pipe, C_bind_vb, C_bind_ib, C_draw,
-       C_push, C_set_vp, C_set_sc, C_begin_cb, C_end_cb, C_submit,
+       C_push, C_push_skip, C_set_vp, C_set_sc, C_begin_cb, C_end_cb, C_submit,
        C_alloc_cb, C_reset_cb, C_reset_fence, C_wait_fence,
        C_alloc_mem, C_free_mem, C_create_buf, C_destroy_buf,
        C_map, C_unmap, C_create_img, C_destroy_img, C_bind_img_mem,
@@ -46,7 +46,7 @@ enum { C_begin_rp, C_end_rp, C_bind_pipe, C_bind_vb, C_bind_ib, C_draw,
 static uint32_t counters[C_COUNT];
 const char *counter_names[] = {
     "beginRenderPass","endRenderPass","bindPipeline","bindVB","bindIB","drawIndexed",
-    "pushConstants","setViewport","setScissor","beginCmdBuf","endCmdBuf","queueSubmit",
+    "pushConstants","pushSkipped","setViewport","setScissor","beginCmdBuf","endCmdBuf","queueSubmit",
     "allocCmdBuf","resetCmdBuf","resetFence","waitFence",
     "allocMem","freeMem","createBuf","destroyBuf",
     "map","unmap","createImg","destroyImg","bindImgMem",
@@ -247,6 +247,7 @@ int main(void) {
         NUM_FRAMES, DRAWS_PER_FRAME, PIPELINE_SWITCH_EVERY, UBO_BIND_EVERY);
 
     VkPipeline current_pipe = pipe_a;
+    float pc_cache[8] = {0};
 
     for (int frame = 0; frame < NUM_FRAMES; frame++) {
         /* Update UBO data for this frame */
@@ -282,12 +283,17 @@ int main(void) {
                 VkWriteDescriptorSet wds={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,0,ds,0,0,1,
                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,0,&dbi,0};
                 pvkUpdateDescriptorSets(dev,1,&wds,0,0); INC(C_update_ds);
-                /* DXVK would also cmdBindDescriptorSets here */
             }
 
-            float a = (frame*DRAWS_PER_FRAME+d)*0.01f;
-            float pc[8]={cosf(a),-sinf(a),0,0, sinf(a),cosf(a),0,0};
-            pvkCmdPushConstants(cb,pl,VK_SHADER_STAGE_VERTEX_BIT,0,32,pc); INC(C_push);
+            /* Push constants: only change every 4th draw */
+            if ((d & 3) == 0) {
+                float a = (frame*DRAWS_PER_FRAME+d)*0.01f;
+                pc_cache[0]=cosf(a); pc_cache[1]=-sinf(a); pc_cache[2]=0; pc_cache[3]=0;
+                pc_cache[4]=sinf(a); pc_cache[5]=cosf(a); pc_cache[6]=0; pc_cache[7]=0;
+                pvkCmdPushConstants(cb,pl,VK_SHADER_STAGE_VERTEX_BIT,0,32,pc_cache); INC(C_push);
+            } else {
+                INC(C_push_skip);
+            }
             pvkCmdDrawIndexed(cb,6,1,0,0,0); INC(C_draw);
         }
 
