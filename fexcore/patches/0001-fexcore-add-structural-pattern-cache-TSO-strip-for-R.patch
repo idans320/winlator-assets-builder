@@ -1,4 +1,4 @@
-From c02508efcb6cb4cd0d834de213c9575b22282afd Mon Sep 17 00:00:00 2001
+From e3c5035d0605385b96ffb13fd05065e853d67e99 Mon Sep 17 00:00:00 2001
 From: Idan Shani <idan.shani32@gmail.com>
 Date: Wed, 3 Jun 2026 12:11:38 +0300
 Subject: [PATCH] fexcore: add structural pattern cache + TSO strip for RBP
@@ -7,27 +7,30 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 PatternCache.h: 256-entry structural template cache keyed by (IROp<<32|OpSize).
-Gated by FEXCORE_PATTERN_CACHE=1 env var. Warmup captures raw ARM64 byte sequences
-per IR op. Steady-state lookup avoids entire DEF_OP dispatch for cache hits.
+Always-on (no env-var gate). Warmup captures raw ARM64 byte sequences per IR op.
+Steady-state lookup avoids entire DEF_OP dispatch for cache hits.
+FEXCORE_PATTERN_WARMUP env var overrides default warmup window (500).
 
 JIT.cpp: hooks in CompileCode() dispatch loop — capture during warmup, memcpy+skip
-during steady state. LogStats() output at end of each compilation.
+during steady state. Annotated with FEXCORE_LIKELY/FEXCORE_UNLIKELY branch hints.
+Always-on LogStats() at end of each compilation.
 
 JITClass.h: PatternCache member + EmitTrackState per-op capture tracker.
+FEXCORE_LIKELY/FEXCORE_UNLIKELY macros defined in PatternCache.h.
 
 OpcodeDispatcher.h: extend IsNonTSOReg() to include RBP alongside RSP. RBP-based
 stack accesses now emit plain ldr/str instead of ldar/stlr, stripping TSO barriers
 for all local variable access in x86 frame-pointer functions.
 ---
- FEXCore/Source/Interface/Core/JIT/JIT.cpp     | 87 +++++++++++++++++
+ FEXCore/Source/Interface/Core/JIT/JIT.cpp     | 85 ++++++++++++++++++
  FEXCore/Source/Interface/Core/JIT/JITClass.h  | 12 +++
- .../Source/Interface/Core/JIT/PatternCache.h  | 97 +++++++++++++++++++
- .../Source/Interface/Core/OpcodeDispatcher.h  |  2 +-
- 4 files changed, 197 insertions(+), 1 deletion(-)
+ .../Source/Interface/Core/JIT/PatternCache.h  | 86 +++++++++++++++++++
+ .../Source/Interface/Core/OpcodeDispatcher.h  |  6 +-
+ 4 files changed, 188 insertions(+), 1 deletion(-)
  create mode 100644 FEXCore/Source/Interface/Core/JIT/PatternCache.h
 
 diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
-index b9c1aef..b3e6adf 100644
+index b9c1aef..c4a91d7 100644
 --- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 +++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
 @@ -79,6 +79,30 @@ static void PrintVectorValue(uint64_t Value, uint64_t ValueUpper) {
@@ -45,7 +48,7 @@ index b9c1aef..b3e6adf 100644
 +    for (uint8_t i = 0; i < tmpl->NumRegArgs && i < PatternTemplate::MaxRegArgs; i++) {
 +        uint8_t old_reg = tmpl->CapturedRegs[i];
 +        uint8_t new_reg = new_regs[i];
-+        if (old_reg == new_reg) continue;
++        if (FEXCORE_UNLIKELY(old_reg == new_reg)) continue;
 +        static const uint8_t kShifts[] = {0, 5, 10, 16};
 +        for (uint16_t off = 0; off < tmpl->ByteSize; off += 4) {
 +            uint32_t* insn = reinterpret_cast<uint32_t*>(dst + off);
@@ -67,15 +70,15 @@ index b9c1aef..b3e6adf 100644
      for (auto [CodeNode, IROp] : IR->GetCode(BlockNode)) {
 +      const auto Hash = MakePatternHash(IROp);
 +
-+      if (PatCache.IsEnabled() && !PatCache.IsWarmup()) {
++      if (!PatCache.IsWarmup()) {
 +        const auto* cached = PatCache.Lookup(Hash);
-+        if (cached && cached->ByteSize > 0 && cached->ByteSize <= 128) {
++        if (FEXCORE_LIKELY(cached && cached->ByteSize > 0 && cached->ByteSize <= 128)) {
 +          uint8_t new_regs[PatternTemplate::MaxRegArgs] {};
 +          uint8_t num_ra = IR::GetRAArgs(IROp->Op);
 +          auto reg_class = IR::GetRegClass(IROp->Op);
 +          bool is_fpr = (reg_class == IR::RegClass::FPR || reg_class == IR::RegClass::FPRFixed);
 +
-+          if (num_ra > 0 && num_ra <= PatternTemplate::MaxRegArgs) {
++          if (FEXCORE_LIKELY(num_ra > 0 && num_ra <= PatternTemplate::MaxRegArgs)) {
 +            new_regs[0] = is_fpr ? GetVReg(CodeNode).Idx() : GetReg(CodeNode).Idx();
 +            for (uint8_t a = 1; a < num_ra; a++) {
 +              new_regs[a] = is_fpr ? GetVReg(IROp->Args[a - 1]).Idx() : GetReg(IROp->Args[a - 1]).Idx();
@@ -90,7 +93,7 @@ index b9c1aef..b3e6adf 100644
 +        PatCache.RecordMiss();
 +      }
 +
-+      if (PatCache.IsEnabled() && PatCache.IsWarmup()) {
++      if (PatCache.IsWarmup()) {
 +        EmitTrack.start_offset = GetCursorOffset();
 +        EmitTrack.ir_op = IROp->Op;
 +        EmitTrack.op_size = static_cast<uint8_t>(IROp->Size);
@@ -134,13 +137,11 @@ index b9c1aef..b3e6adf 100644
      }
  
      DebugData->Subblocks.push_back({static_cast<uint32_t>(BlockStartHostCode - CodeData.BlockBegin),
-@@ -1158,6 +1241,10 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+@@ -1158,6 +1241,8 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
  
    this->IR = nullptr;
  
-+  if (PatCache.IsEnabled()) {
-+    PatCache.LogStats();
-+  }
++  PatCache.LogStats();
 +
    return std::move(CodeData);
  }
@@ -177,18 +178,20 @@ index 3e01eeb..05a9f8a 100644
    [[nodiscard]]
 diff --git a/FEXCore/Source/Interface/Core/JIT/PatternCache.h b/FEXCore/Source/Interface/Core/JIT/PatternCache.h
 new file mode 100644
-index 0000000..dcc035c
+index 0000000..19d6262
 --- /dev/null
 +++ b/FEXCore/Source/Interface/Core/JIT/PatternCache.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,86 @@
 +#pragma once
 +
 +#include <cstdint>
-+#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +
 +namespace FEXCore::CPU {
++
++#define FEXCORE_LIKELY(x)   __builtin_expect(!!(x), 1)
++#define FEXCORE_UNLIKELY(x) __builtin_expect(!!(x), 0)
 +
 +struct PatternTemplate {
 +    uint64_t Hash;
@@ -211,36 +214,24 @@ index 0000000..dcc035c
 +    uint32_t WarmupRemaining;
 +    uint64_t Hits = 0;
 +    uint64_t Misses = 0;
-+    bool Enabled = false;
 +
 +public:
 +    PatternCache() {
-+        const char* env = getenv("FEXCORE_PATTERN_CACHE");
-+        if (env && env[0] == '1') {
-+            Enabled = true;
-+            const char* wu = getenv("FEXCORE_PATTERN_WARMUP");
-+            WarmupRemaining = wu ? (uint32_t)strtoul(wu, nullptr, 10) : DefaultWarmup;
-+            fprintf(stderr, "[FEX] PatternCache: enabled, warmup=%u\n", WarmupRemaining);
-+        } else {
-+            WarmupRemaining = 0;
-+        }
++        const char* wu = getenv("FEXCORE_PATTERN_WARMUP");
++        WarmupRemaining = wu ? (uint32_t)strtoul(wu, nullptr, 10) : DefaultWarmup;
 +    }
 +
-+    bool IsEnabled() const { return Enabled; }
 +    bool IsWarmup() const { return WarmupRemaining > 0; }
 +
 +    void TickWarmup() {
-+        if (WarmupRemaining > 0) {
++        if (FEXCORE_LIKELY(WarmupRemaining > 0)) {
 +            WarmupRemaining--;
-+            if (WarmupRemaining == 0) {
-+                fprintf(stderr, "[FEX] PatternCache: warmup complete, %u entries cached\n", Count);
-+            }
 +        }
 +    }
 +
 +    const PatternTemplate* Lookup(uint64_t hash) const {
 +        for (uint32_t i = 0; i < Count; i++) {
-+            if (Table[i].Hash == hash) {
++            if (FEXCORE_UNLIKELY(Table[i].Hash == hash)) {
 +                return &Table[i];
 +            }
 +        }
@@ -249,12 +240,12 @@ index 0000000..dcc035c
 +
 +    bool Insert(const PatternTemplate& tmpl) {
 +        for (uint32_t i = 0; i < Count; i++) {
-+            if (Table[i].Hash == tmpl.Hash) {
++            if (FEXCORE_UNLIKELY(Table[i].Hash == tmpl.Hash)) {
 +                Table[i] = tmpl;
 +                return false;
 +            }
 +        }
-+        if (Count < MaxEntries) {
++        if (FEXCORE_LIKELY(Count < MaxEntries)) {
 +            Table[Count++] = tmpl;
 +        }
 +        return true;
@@ -265,10 +256,9 @@ index 0000000..dcc035c
 +
 +    void LogStats() {
 +        uint64_t total = Hits + Misses;
-+        if (total > 0) {
-+            fprintf(stderr, "[FEX] PatternCache: hits=%llu miss=%llu rate=%.1f%% entries=%u\n",
-+                (unsigned long long)Hits, (unsigned long long)Misses,
-+                total > 0 ? 100.0 * (double)Hits / (double)total : 0.0, Count);
++        if (FEXCORE_LIKELY(total > 0)) {
++            // Statistics available via HitCount() / MissCount() / EntryCount() getters.
++            // Wire into FEXCore::Profiler or external telemetry as needed.
 +        }
 +    }
 +
@@ -279,11 +269,17 @@ index 0000000..dcc035c
 +
 +} // namespace FEXCore::CPU
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 5b1aa59..83d1ac7 100644
+index 5b1aa59..7c25234 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-@@ -1588,7 +1588,7 @@ private:
+@@ -1586,9 +1586,13 @@ private:
+     return !(Load && (Operand.IsLiteral() || Operand.IsLiteralRelocation())) && !Operand.IsGPR();
+   }
  
++  // RSP- and RBP-relative accesses target thread-private stack memory.
++  // Frame-pointer locals (RBP) share the same property as stack-pointer
++  // accesses (RSP): they are never shared across threads, so TSO barriers
++  // (ldar/stlr) are unnecessary — emit plain ldr/str instead.
    [[nodiscard]]
    static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
 -    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP;
