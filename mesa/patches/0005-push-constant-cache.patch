@@ -1,8 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
-index daeef60..87902f6 100644
+index daeef60..3a3c441 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
-@@ -7619,28 +7619,42 @@ tu6_const_size(struct tu_cmd_buffer *cmd,
+@@ -7619,28 +7619,28 @@ tu6_const_size(struct tu_cmd_buffer *cmd,
     return dwords;
  }
  
@@ -42,47 +42,44 @@ index daeef60..87902f6 100644
 +    if (dwords == 0)
 +       return (struct tu_draw_state) {};
 +
-+    /* Push constant cache: if the values are identical to the last
-+     * emission, skip rebuilding the sub-CS entirely.  This is safe
-+     * because push constants are persistent in the GPU register file
-+     * (unchanged by CP_SET_DRAW_STATE loads for other state groups).
-+     *
-+     * The draw state must be freshly allocated even on cache hit —
-+     * the old sub-CS location may have been overwritten by other state
-+     * emissions since tu_emit_consts was last called.
-+     */
-+    bool cached = cmd->pc_cache_valid &&
-+        !memcmp(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache));
-+
 +    struct tu_cs cs;
 +    tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
 +
-+    if (!cached) {
-+       if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
-+          tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
-+       } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
-+          tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
-+       }
++    if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
++       tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
++    } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
++       tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
 +    }
  
     if (compute) {
        tu6_emit_per_stage_push_consts(
-@@ -7669,8 +7683,13 @@ tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
+@@ -7669,8 +7669,9 @@ tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
        }
     }
  
 -   return tu_cs_end_draw_state(&cmd->sub_cs, &cs);
 -}
-+    /* Cache the push constants we just emitted (or confirmed cached) */
-+    memcpy(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache));
-+    cmd->pc_cache_valid = true;
-+
 +    return tu_cs_end_draw_state(&cmd->sub_cs, &cs);
 + }
 +
  
  /* Returns true if stencil may be written when depth test fails.
   * This could be either from stencil written on depth test fail itself,
+@@ -8345,8 +8346,13 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
+       }
+    }
+ 
+-   if (dirty & TU_CMD_DIRTY_SHADER_CONSTS)
++   if ((dirty & TU_CMD_DIRTY_SHADER_CONSTS) &&
++       (!cmd->pc_cache_valid ||
++        memcmp(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache)))) {
+       cmd->state.shader_const = tu_emit_consts<CHIP>(cmd, false);
++      memcpy(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache));
++      cmd->pc_cache_valid = true;
++   }
+ 
+    if (dirty & TU_CMD_DIRTY_DESC_SETS)
+       tu6_emit_descriptor_sets<CHIP>(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.h b/src/freedreno/vulkan/tu_cmd_buffer.h
 index e16092e..f09de0c 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.h
