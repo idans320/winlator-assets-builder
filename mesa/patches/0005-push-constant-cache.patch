@@ -1,8 +1,8 @@
 diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
-index daeef60..4161caa 100644
+index daeef60..87902f6 100644
 --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
 +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
-@@ -7619,28 +7619,38 @@ tu6_const_size(struct tu_cmd_buffer *cmd,
+@@ -7619,28 +7619,42 @@ tu6_const_size(struct tu_cmd_buffer *cmd,
     return dwords;
  }
  
@@ -19,6 +19,15 @@ index daeef60..4161caa 100644
 -
 -   if (dwords == 0)
 -      return (struct tu_draw_state) {};
+-
+-   struct tu_cs cs;
+-   tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
+-
+-   if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
+-      tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
+-   } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
+-      tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
+-   }
 + template <chip CHIP>
 + static struct tu_draw_state
 + tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
@@ -34,40 +43,37 @@ index daeef60..4161caa 100644
 +       return (struct tu_draw_state) {};
 +
 +    /* Push constant cache: if the values are identical to the last
-+     * emission, skip rebuilding the sub-CS.  The old draw state
-+     * (cmd->state.shader_const) still contains the correct PKT4
-+     * stream — CP_SET_DRAW_STATE will reload it as-is.
++     * emission, skip rebuilding the sub-CS entirely.  This is safe
++     * because push constants are persistent in the GPU register file
++     * (unchanged by CP_SET_DRAW_STATE loads for other state groups).
++     *
++     * The draw state must be freshly allocated even on cache hit —
++     * the old sub-CS location may have been overwritten by other state
++     * emissions since tu_emit_consts was last called.
 +     */
-+    if (cmd->pc_cache_valid &&
-+        !memcmp(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache))) {
-+       return cmd->state.shader_const;
-+    }
- 
--   struct tu_cs cs;
--   tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
++    bool cached = cmd->pc_cache_valid &&
++        !memcmp(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache));
++
 +    struct tu_cs cs;
 +    tu_cs_begin_sub_stream(&cmd->sub_cs, dwords, &cs);
- 
--   if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
--      tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
--   } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
--      tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
--   }
-+    if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
-+       tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
-+    } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
-+       tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
++
++    if (!cached) {
++       if (shared_consts->type == IR3_PUSH_CONSTS_SHARED) {
++          tu6_emit_shared_consts(&cs, shared_consts, cmd->push_constants, compute);
++       } else if (shared_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
++          tu7_emit_shared_preamble_consts<CHIP>(&cs, shared_consts, cmd->push_constants);
++       }
 +    }
  
     if (compute) {
        tu6_emit_per_stage_push_consts(
-@@ -7669,8 +7679,13 @@ tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
+@@ -7669,8 +7683,13 @@ tu_emit_consts(struct tu_cmd_buffer *cmd, bool compute)
        }
     }
  
 -   return tu_cs_end_draw_state(&cmd->sub_cs, &cs);
 -}
-+    /* Cache the push constants we just emitted */
++    /* Cache the push constants we just emitted (or confirmed cached) */
 +    memcpy(cmd->pc_cache, cmd->push_constants, sizeof(cmd->pc_cache));
 +    cmd->pc_cache_valid = true;
 +
