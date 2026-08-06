@@ -1,168 +1,285 @@
-# TU8 Hacks: Turnip gen8 Performance Optimizations
+# TU8 Hacks: whitebelyash/mesa-unified turnip/gen8 vs Vanilla Mesa
 
-Research documenting the complete set of performance hacks applied to Mesa Turnip
-for Adreno 8xx GPUs (Snapdragon 8 Elite), and how they differ from vanilla Mesa.
+Complete diff analysis between the **turnip/gen8** fork (`whitebelyash/mesa-unified`)
+and **upstream freedesktop.org Mesa main** (as of Mesa 26.3.0-devel).
+
+## Overview
+
+**603 lines changed across 17 files** in `src/freedreno/vulkan/`. The fork contains
+real driver changes — NOT script-injected hacks. The `apply-all-hacks.sh` script
+is a *separate* experimental injection layer applied post-clone.
 
 ## Quick Navigation
 
 | Section | Description |
 |---------|-------------|
-| [Hack Comparison Matrix](#hack-comparison-matrix) | All hacks vs vanilla Mesa at a glance |
-| [Vanilla vs Hacked Architecture](#vanilla-vs-hacked-architecture) | Go graph analysis of affected code paths |
-| [Quantitative Impact](#quantitative-impact) | Measured PKT4/draw savings from trace analysis |
-| [Hack Details](hacks/) | Deep-dive into each hack's mechanism |
-| [Graph Analysis](analysis/) | Go analysis results: neuron paths, register hotspots, call graphs |
+| [Change Matrix](#change-matrix) | Every changed file with line counts |
+| [Major Changes](#major-changes) | Deep dive into 9 categories of changes |
+| [Vanilla vs Fork Architecture](#vanilla-vs-fork-architecture) | Code flow comparison |
+| [Go Graph Analysis](analysis/gen8-neuron-paths.md) | Gen8 code site mapping, neuron paths |
+| [Impact Assessment](analysis/impact-metrics.md) | Performance, stability, code quality |
+| [Full Diff](analysis/full-diff.md) | Complete side-by-side diff of all 17 files |
 
-## Architecture Overview
-
-```
-  Vulkan API Calls
-        │
-        ▼
-  tu_CmdDraw / tu_CmdDispatch
-        │
-        ▼
-  ┌──────────────────────────────────────┐
-  │  VANILLA MESA (A6XX code path)      │
-  │                                      │
-  │  For every draw:                     │
-  │  1. tu_emit_cache_flush → 10+ PKT7  │
-  │  2. tu_emit_pkt4 × N → N dwords     │
-  │  3. HLSQ regs × 12, RB regs × 11    │
-  │  4. Repeat all of above for next draw│
-  └──────────────────────────────────────┘
-
-  ┌──────────────────────────────────────┐
-  │  HACKED: TU8 Optimization Stack     │
-  │                                      │
-  │  For every draw:                     │
-  │  1. YOLO_SYNC → skip barriers       │ ◄── strip 10+ PKT7/draw
-  │  2. tu_cs_set_register → shadow[]   │ ◄── deduplicate reg writes
-  │  3. tu_cs_flush_dirty → compact PKT4│ ◄── emit only dirtied regs
-  │  4. REG_BLAST → brute-force blocks  │ ◄── skip ffs scan overhead
-  │  5. STATE_THROTTLE → skip N draws   │ ◄── batch writes across draws
-  │  6. BARRIER_COALESCE → skip flush   │ ◄── no-op when flush_bits==0
-  │                                      │
-  │  At EndRenderPass:                   │
-  │  7. tu_cs_flush_barrier_yolo → WFI  │ ◄── single barrier, not per-draw
-  └──────────────────────────────────────┘
-```
-
-## Hack Comparison Matrix
-
-| Feature | Vanilla Mesa | TU8 Hacked | Environment Var |
-|---------|-------------|------------|-----------------|
-| **Register emission** | `tu_cs_emit_pkt4` writes directly to command stream | `tu_cs_set_register` writes to shadow[], deferred batch flush | (always on for A8XX+) |
-| **Redundant write detection** | None — every write emitted | Two-tier dirty-bit: writes suppressed if value unchanged | — |
-| **Per-draw barriers** | `CP_WAIT_FOR_IDLE` + `CP_WAIT_FOR_ME` + `CP_EVENT_WRITE` on every `tu_emit_cache_flush` | Skipped, single mega-flush at EndRenderPass | `TU_YOLO_SYNC=1` |
-| **State throttling** | Not available | Flush dirty registers only every N draws | `TU_SKIP_STATE=N` |
-| **Register block dump** | Not available | Brute-force 64-reg PKT4 emission (skip ffs scan) | `TU_REG_BLAST=1` |
-| **Barrier coalescing** | Barrier emission pipeline always runs | Early-return when `flush_bits == 0` | `TU_BARRIER_COALESCE=1` |
-| **Push constant cache** | Every `vkCmdPushConstants` emitted | Cache last value per slot, skip if unchanged | (probes only) |
-| **Data structure** | None | `struct tu_cs.dirty` — 5120-entry shadow + 3×64-bit block bitfields + slot bitfields | — |
-| **Memory overhead** | 0 bytes | ~20KB per `tu_cs` (shadow) + ~256B (bitfields) | — |
-
-## Vanilla vs Hacked: Code Flow
-
-### Vanilla Mesa: Register Write Path
+## Change Matrix
 
 ```
-tu_CmdDraw()                                  // tu_cmd_buffer.cc
-  → tu6_draw_common()                         // tu_cmd_buffer.cc
-    → tu_emit_cache_flush_renderpass()        // tu_cmd_buffer.cc
-      → tu_emit_cache_flush()                 // tu_cmd_buffer.cc
-        → tu6_emit_flushes<A8XX>()            // tu_cmd_buffer.cc
-          → CP_WAIT_FOR_IDLE (PKT7)
-          → CP_WAIT_FOR_ME (PKT7)
-          → CP_EVENT_WRITE (PKT7)
-    → tu_cs_emit_pkt4(reg, 1)                 // tu_cs.h — inline, immediate emission
-    → tu_cs_emit(value)                       // tu_cs.h — inline, immediate emission
-    → [repeated for every register: HLSQ×12, RB×11, VPC×19, SP×32, GRAS×43]
+File                            +lines  -lines  Net     Category
+───────────────────────────────────────────────────────────────
+tu_shader.cc                    169     11      +158    Speculative descriptor access
+tu_device.cc                    40      5       +35     Device spoofing + Vulkan 1.3 force
+tu_knl_kgsl.cc                  24      12      +12     KGSL wait robustness
+tu_descriptor_set.cc            12      0       +12     Partially-bound descriptor support
+tu_descriptor_set.h             6       0       +6      Descriptor layout metadata
+tu_subsampled_image.cc          6       1       +5      Speculative subsampled loads
+tu_subsampled_image.h           2       1       +1      API change for speculation
+tu_util.cc                      1       0       +1      DECK_EMU debug flag
+tu_util.h                       1       0       +1      DECK_EMU enum bit
+tu_version.h                    1       —       +1      New file: driver version string
+tu_clear_blit.cc                1       1       0       A6XX register fix
+tu_pipeline.cc                  12      5       +7      Target GPU flags + register fix
+tu_event.cc                     7       8       -1      Function reorder
+tu_cmd_buffer.h                 0       1       -1      Remove lrz_disable_for_next_rp
+tu_lrz.h                        0       2       -2      De-template LRZ functions
+tu_cmd_buffer.cc                21      18      +3      LRZ simplification + GMEM disable
+tu_lrz.cc                       40      85      -45     LRZ code removal/simplification
+tu_query_pool.cc                7       70      -63     Perf query simplification
+───────────────────────────────────────────────────────────────
+TOTAL                           348     220     +128     (net: 603 changed lines)
 ```
 
-### Hacked: Register Write Path
+## Major Changes
 
+### 1. Speculative Descriptor Access (+158 lines, tu_shader.cc)
+
+**The largest single change.** Adds `ACCESS_CAN_SPECULATE` to bindless descriptor
+loads. When descriptor indexing is static and the binding is fully bound, the
+compiler marks the access as speculatable — the GPU can prefetch descriptors
+without waiting for all dependencies to resolve.
+
+```c
+// Vanilla: always safe, no speculation
+nir_def *bindless = nir_bindless_resource_ir3(b, 32, desc_offset,
+    .desc_set = set);
+
+// Fork: speculative when safe
+bool can_speculate = !nir_src_is_const(deref->arr.index) ||
+    (set_layout->has_variable_descriptors && ...);
+*descriptor_valid = !bind_layout->partially_bound && can_speculate;
+nir_def *bindless = nir_bindless_resource_ir3(b, 32, desc_offset,
+    .desc_set = set,
+    .access = can_speculate ? ACCESS_CAN_SPECULATE : 0);
 ```
-tu_CmdDraw()                                  // tu_cmd_buffer.cc
-  → tu6_draw_common()                         // tu_cmd_buffer.cc
-    → tu_emit_cache_flush_renderpass()        // tu_cmd_buffer.cc
-      → if (YOLO_SYNC) → yolo_barrier_needed=true; return;  ← HACK
-    → tu_cs_set_register(cs, reg, val)        // tu_cs.h — HACK added
-      → if (!dirty.enabled) goto emit
-      → if (shadow[idx] == val) return        // redundant write suppression
-      → shadow[idx] = val
-      → regs[block] |= (1 << bit)             // mark dirty
-      → blocks[tier1] |= (1 << block)         // mark dirty block
-    → [registers accumulate in shadow[], no PKT4 emitted yet]
-    → tu_cs_flush_dirty(cs)                   // HACK — called before draw state submit
-      → if (STATE_THROTTLE) → skip every N draws
-      → if (REG_BLAST) → dump 32-reg blocks
-      → else → ffs-scan dirty bits, merge consecutive into compact PKT4 batches
 
-At EndRenderPass:
-    → tu_cs_flush_barrier_yolo(cs)            // HACK — single WFI for all draws
-      → CP_EVENT_WRITE + CP_WAIT_FOR_IDLE
+**Why it matters:** Descriptor loads are a common pipeline stall point. Allowing
+speculation means the GPU can fetch descriptors in parallel with other work,
+reducing draw-call latency. The safety check ensures speculation is only done
+when the descriptor index is provably valid.
+
+### 2. LRZ (Low-Resolution Z) Simplification (-45 lines, tu_lrz.cc + tu_lrz.h)
+
+The fork removes two complex LRZ disable mechanisms:
+
+**Removed functions:**
+- `tu_lrz_emit_force_disable_for_rp<CHIP>()` — emitted `CP_REG_RMW` on A7XX+ or
+  `GRAS_LRZ_VIEW_INFO` on A6XX to force-disable LRZ for next renderpass
+- `tu_lrz_emit_disable_write_for_rp<CHIP>()` — emitted dual `CP_REG_RMW` to disable
+  LRZ write (GRAS_SC_BIN_CNTL + RB_CNTL)
+
+**Replaced with:** Simple A6XX-style `GRAS_LRZ_VIEW_INFO` writes on all chips:
+```c
+// Fork: always use simple register write
+tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_VIEW_INFO(
+    .base_layer = 0b11111111111,
+    .layer_count = 0b11111111111,
+    .base_mip_level = 0b1111,
+));
 ```
 
-## Source Files Modified
+**Also removed:** `lrz_disable_for_next_rp` flag from `tu_render_pass_state` —
+the fork uses simpler invalidation logic.
 
-| File | Hack | Lines Modified |
-|------|------|---------------|
-| `src/freedreno/vulkan/tu_cs.h` | Dirty shadow + set_register + flush_dirty + flush_barrier_yolo | +120 lines (struct + 4 functions) |
-| `src/freedreno/vulkan/tu_cs.cc` | tu_cs_init (dirty init), tu_cs_reset/finish (free), #include <stdlib.h> | +15 lines |
-| `src/freedreno/vulkan/tu_cmd_buffer.cc` | YOLO in tu_emit_cache_flush + renderpass variant | +6 lines |
+**Also de-templatized:** `tu_lrz_flush_valid_at_secondary_rp_boundary` and
+`tu_lrz_flush_valid_at_suspending_rp_boundary` are no longer chip-templated,
+reducing code duplication.
 
-## Quantitative Impact
+### 3. Device/Driver Spoofing (+35 lines, tu_device.cc)
 
-Measured via PM4 trace decoder on probe workloads:
-
-| Workload | Vanilla Writes | Hacked Writes | Reduction |
-|----------|---------------|---------------|-----------|
-| Single triangle (probe_draw) | 453 writes / 501 pkts | 448 writes / 496 pkts | **-5 writes** (-1.1%) |
-| Blit operation | 309 writes / 329 pkts | 307 writes / 327 pkts | **-2 writes** (-0.6%) |
-| DXVK simulator (100 draws) | 48,675 writes | 45,375 writes | **-3,300 writes** (-6.8%) |
-
-**Stimulation-estimated savings** (Go fuzz/stub pipeline):
-
-| Optimization | Light (100d) | Heavy (1000d) | Blit (500b) | Barrier | State |
-|-------------|-------------|--------------|------------|---------|-------|
-| Redundant write filter | 11.4% | 11.4% | 33.5% | 11.0% | 11.0% |
-| Barrier coalescing | 130 skip | 1600 skip | 230 skip | 1250 skip | 330 skip |
-| Combined | **~15%** | **~15%** | **~33%** | **~17%** | **~14%** |
-
-## Applying the Hacks
-
-```bash
-# One-shot: inject all hacks into cloned Mesa source
-./apply-all-hacks.sh
-
-# Then build Mesa Turnip (hacks auto-activate for A8XX+ chips)
-devbox run -- bash mesa/build.sh
-
-# Control at runtime via environment variables:
-# TU_YOLO_SYNC=1        Strip per-draw barriers
-# TU_SKIP_STATE=4       Flush dirty registers every 4th draw
-# TU_REG_BLAST=1        Use brute-force 64-reg block dump
-# TU_BARRIER_COALESCE=1  Skip flush emission when no flush bits
+**Steam Deck Emulation** (`TU_DEBUG=deck_emu`):
+```c
+if (TU_DEBUG(DECK_EMU)) {
+    p->driverID = VK_DRIVER_ID_MESA_RADV;
+    snprintf(p->driverName, ..., "radv");
+    props->vendorID = 0x1002;   // AMD
+    props->deviceID = 0x163F;   // Van Gogh (Steam Deck APU)
+    strcpy(props->deviceName, "AMD Custom GPU 0405 (RADV VANGOGH)");
+}
 ```
+
+Spoofs the Turnip driver as AMD RADV (Steam Deck GPU) for game compatibility.
+Many games check for RADV specifically and refuse to run on Turnip.
+
+**Forced Vulkan 1.3:**
+```c
+// Vanilla: only VK 1.3 on devices with multiview
+props->apiVersion = tu_has_multiview(pdevice)
+    ? VK_MAKE_VERSION(1, 3, ...)
+    : VK_MAKE_VERSION(1, 0, ...);
+
+// Fork: VK 1.3 on all gen7+ devices
+props->apiVersion = pdevice->info->chip >= 7
+    ? TU_API_VERSION
+    : VK_MAKE_VERSION(1, 3, ...);
+```
+
+Comment in code: "Minecraft checks VK1.2 presence and refuses to start on VK1.0"
+
+**Driver branding:**
+- Driver name: `"turnip Mesa driver"` → `"turnip Mesa driver (whitebelyash branch)"`
+- Device name appended with `(TUGEN8_DRV_VERSION)` from `tu_version.h`
+
+**Concurrent binning disabled:**
+```c
+tu_env.debug |= TU_DEBUG_NO_CONCURRENT_BINNING;
+```
+
+### 4. KGSL Wait Robustness (+12 lines, tu_knl_kgsl.cc)
+
+**Mutex protection:** All `wait_timestamp_safe()` calls now take `&device->submit_mutex`
+to prevent races between submission and wait.
+
+**Error handling improvements:**
+```c
+// Vanilla: assert crash on non-timeout errors
+assert(errno == ETIMEDOUT);
+return VK_TIMEOUT;
+
+// Fork: log and report device lost on unexpected errors
+if (errno == ETIMEDOUT || errno == EINVAL) {
+    return VK_TIMEOUT;
+} else {
+    fprintf(stderr, "TU_KNL_KGSL: wait_timestamp_safe errno=%d (%s)\n",
+            errno, strerror(errno));
+    return VK_ERROR_DEVICE_LOST;
+}
+```
+
+**EDEADLK handling:** On `EDEADLK`, calls `sched_yield()` before retrying — handles
+the mutex deadlock avoidance protocol.
+
+### 5. Partially-Bound Descriptors (+12 lines, tu_descriptor_set.cc/h)
+
+Adds `partially_bound` flag to `tu_descriptor_set_binding_layout`:
+```c
+set_layout->binding[b].partially_bound =
+    (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT) ||
+    (variable_flags && (binding_flags & VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT));
+```
+
+This feeds into the speculative descriptor access logic — when a binding is
+partially bound, the driver cannot speculate access because some descriptors
+may be invalid.
+
+Also included in the pipeline cache hash (BLAKE3) to prevent cache collisions
+when this flag differs.
+
+### 6. A6XX Register Fix (tu_clear_blit.cc, tu_pipeline.cc)
+
+**Replaces `PC_RAST_STREAM_CNTL` with `VPC_UNKNOWN_9107` on A6XX:**
+```c
+// Vanilla:
+tu_cs_emit_regs(cs, PC_RAST_STREAM_CNTL(CHIP,
+    .stream = rs->rasterization_stream,
+    .discard = rs->rasterizer_discard_enable));
+
+// Fork:
+tu_cs_emit_regs(cs, VPC_UNKNOWN_9107(CHIP,
+    .raster_discard = rs->rasterizer_discard_enable));
+```
+
+This is a register name correction — `PC_RAST_STREAM_CNTL` at offset 0x9107 is
+actually a VPC register on A6XX, confirmed by the Adreno register documentation.
+The upstream name was misleading.
+
+### 7. Target GPU Optimizations (tu_pipeline.cc)
+
+**Disables FDM per-layer on target GPUs:**
+```c
+const bool is_target_gpu = is_a810 || is_a825 || is_a829 || is_a830;
+keys[last_pre_rast_stage].fdm_per_layer =
+    is_target_gpu ? false : builder->fdm_per_layer;
+```
+
+Fragment Density Map per-layer requires hardware support that may be buggy on
+these specific GPUs. The fork disables it rather than risking rendering artifacts.
+
+**Disables force_sample_interp on target GPUs:**
+```c
+keys[MESA_SHADER_FRAGMENT].force_sample_interp =
+    is_target_gpu ? false : (!builder->rasterizer_discard && msaa_info && ...);
+```
+
+Force sample interpolation can cause performance regressions on A8XX.
+
+### 8. Perf Query Simplification (-63 lines, tu_query_pool.cc)
+
+Removes the multi-pass counter system. In vanilla, counters for a group can be
+split across multiple passes (each pass gets a subset of counters). The fork
+simplifies to single-pass counter allocation:
+
+```c
+// Vanilla: complex pass-based counter allocation
+struct perfcntr_query_group_state *group_state = rzalloc_array(...);
+if (state.next_counter == available_counters) {
+    state.next_counter = 0; state.pass++;
+}
+perf_query->data[i].pass = state.pass;
+
+// Fork: simple direct reservation
+perf_query->data[i].counter =
+    fd_perfcntr_reserve(device->perfcntrs, group, countable);
+```
+
+### 9. GMEM Disable for Unsupported GPUs (tu_cmd_buffer.cc)
+
+```c
+bool no_gmem = cmd->device->physical_device->dev_info.props.disable_gmem;
+if (no_gmem) {
+    cmd->state.rp.gmem_disable_reason = "Unsupported GPU";
+    return true;
+}
+```
+
+Allows GMEM (on-chip tile buffer) to be selectively disabled via physical device
+properties, enabling sysmem-only rendering on GPUs with buggy GMEM.
+
+## Files NOT Changed (Vanilla = Fork)
+
+The following 56 files in `src/freedreno/vulkan/` are identical between the
+fork and upstream Mesa — these were NOT modified by the turnip/gen8 branch:
+`tu_cs.h`, `tu_cs.cc` (no dirty-shadow system), `tu_autotune.cc`, `tu_image.cc`,
+`tu_pass.cc`, `tu_rmv.cc`, `tu_wsi.cc`, etc.
+
+**This confirms the dirty-shadow register system, YOLO_SYNC, barrier coalescing,
+etc. are NOT part of the fork — they're separate experimental hacks applied by
+`apply-all-hacks.sh` post-clone.**
 
 ## Directory
 
 ```
 tu8-hacks/
-├── README.md                    # This file — overview + comparison
+├── README.md                         # Overview, change matrix, major changes
 ├── hacks/
-│   ├── 00-overview.md           # Architecture + how hacks compose
-│   ├── 01-dirty-shadow-registers.md  # Two-tier dirty-bit shadow system
-│   ├── 02-yolo-sync.md          # Barrier stripping + deferred mega-flush
-│   ├── 03-state-throttle.md     # Flush skipping every N draws
-│   ├── 04-reg-blast.md          # Brute-force 64-reg block dump
-│   ├── 05-barrier-coalesce.md   # Skip flush when no bits accumulated
-│   └── 06-push-constant-cache.md # DXVK-style push constant deduplication
+│   ├── 01-speculative-descriptors.md  # +158 lines, ACCESS_CAN_SPECULATE
+│   ├── 02-lrz-simplification.md       # -45 lines, CP_REG_RMW removal
+│   ├── 03-device-spoofing.md          # +35 lines, Deck emu + VK1.3 force
+│   ├── 04-kgsl-wait-robustness.md     # +12 lines, mutex + error handling
+│   ├── 05-minor-fixes.md              # Register rename, target GPU, query simplify
+│   └── 06-apply-all-hacks.md          # Separate script: dirty-shadow, YOLO, etc.
 ├── analysis/
-│   ├── gen8-neuron-paths.md     # Go graph: which code paths carry A8XX register writes
-│   ├── register-hotspots.md     # Top-written GPU registers mapped to hardware blocks
-│   └── impact-metrics.md        # Trace diff results + fuzz stimulation benchmarks
+│   ├── gen8-neuron-paths.md           # Go graph: changed code → gen8 sites
+│   ├── impact-metrics.md              # Performance, stability, complexity
+│   └── full-diff.md                   # Side-by-side diff of all 17 files
 └── patches/
-    └── apply-all-hacks.sh       # Reference: the hack injection script (symlink to root)
+    ├── 0003-tu-cs-reg-cache.patch     # Hash-table regcache variant (legacy)
+    └── 0004-barrier-coalesce.patch    # Barrier coalesce patch
 ```

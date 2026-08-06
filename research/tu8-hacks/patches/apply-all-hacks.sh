@@ -1,1 +1,0 @@
-/home/idans/winlator-cmod-builder/apply-all-hacks.sh
