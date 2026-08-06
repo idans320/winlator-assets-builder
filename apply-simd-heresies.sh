@@ -246,37 +246,12 @@ new_trunc = '''   /* SIMD HERESY C cont'd: Replace truncf(float) with direct
 
 gb = gb.replace(old_trunc, new_trunc, 1)
 
+write(f"{COMMON}/freedreno_guardband.h", gb)
+
 # ===========================================================================
-# HERESY D: Dynamic descriptor VA patching with ARM load-pair+add-with-carry
-# Replace memcpy + scalar VA reconstruction with native AArch64 ldp/addc/stp.
-# tu_cmd_buffer.cc:4793-4802
+# HERESY D (NEON VA patching): Merged into Heresy DJ below.
+# Heresy DJ does 4-wide ILP + removes memcpy — this section is now a no-op.
 # ===========================================================================
-old_d = '''               memcpy(dst, src, binding->size);
-
-               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-                  /* Note: we can assume here that the addition won't roll
-                   * over and change the SIZE field.
-                   */
-                  uint64_t va = src[0] | ((uint64_t)src[1] << 32);
-                  va += offset;
-                  dst[0] = va;
-                  dst[1] = va >> 32;'''
-
-new_d = '''               /* SIMD HERESY D: Neon-like VA patching via AArch64
-                * load-pair + add-with-carry + store-pair.  Avoids libc memcpy
-                * overhead for 8-byte descriptor slots.  For UBO descriptors
-                * (FDL6_TEX_CONST_DWORDS * 4 bytes), unroll Neon copy.
-                */
-               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-                  uint64_t va = src[0] | ((uint64_t)src[1] << 32);
-                  va += offset;
-                  dst[0] = (uint32_t)va;
-                  dst[1] = (uint32_t)(va >> 32);
-                  if (binding->size > 8)
-                     memcpy(dst + 2, src + 2, binding->size - 8);'''
-
-cmd = cmd.replace(old_d, new_d, 1)
-
 # ===========================================================================
 # HERESY E: Vectorized BITSET dirty-state checks
 # Replace BITSET_TEST call chain with rbit+clz+switch dispatch.
@@ -437,46 +412,73 @@ new_i = '''   /* SIMD HERESY I: Inline push constant copy via bounded word loop.
 cmd = cmd.replace(old_i, new_i, 1)
 
 # ===========================================================================
-# HERESY J: Oryon ILP Shattering — horizontal interleave for descriptor VA
-# Restructure the inner dynamic descriptor copy to issue all loads before
-# all stores, breaking the loop-carried dependency chain on the pointer.
-# Oryon's 8-wide decode can dispatch all LDRs in parallel if grouped.
-# tu_cmd_buffer.cc:4814-4845 (inner loop body)
+# HERESY DJ (merged D+J): 4-wide horizontal UBO VA patching + no memcpy
+# Replaces the original inner loop body for dynamic descriptor copies.
+# On the first iteration (k==0) of a UBO size==8 binding with >=4 descriptors,
+# replaces the entire loop with a 4-wide horizontal batch: all loads first,
+# all computation in parallel, all stores last. Falls through to original
+# scalar path for SSBO/texel/small bindings. Also removes the memcpy call
+# that Heresy D was handling separately.
 # ===========================================================================
-old_j = '''               /* SIMD HERESY D: Neon-like VA patching via AArch64
-                * load-pair + add-with-carry + store-pair.  Avoids libc memcpy
-                * overhead for 8-byte descriptor slots.  For UBO descriptors
-                * (FDL6_TEX_CONST_DWORDS * 4 bytes), unroll Neon copy.
+
+# Inject combined DJ into fresh clone source
+old_dj = '''               memcpy(dst, src, binding->size);
+
+               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                  /* Note: we can assume here that the addition won't roll
+                   * over and change the SIZE field.
+                   */
+                  uint64_t va = src[0] | ((uint64_t)src[1] << 32);
+                  va += offset;
+                  dst[0] = va;
+                  dst[1] = va >> 32;'''
+
+new_dj = '''               /* SIMD HERESY D+J: 4-wide horizontal UBO VA patching.
+                * On first iteration of a UBO size==8 binding with >=4
+                * descriptors, all iterations are consumed horizontally:
+                * 4 loads → 4 adds → 4 stores with zero cross-iteration
+                * dependencies.  Oryon dispatches all LDRs, all ADDS,
+                * all STRs in parallel across the 8-wide decode.
+                * Falls through to scalar path for SSBO/texel/small bindings.
                 */
+               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC &&
+                   binding->size == 8 && binding->array_size >= 4 && k == 0) {
+                  while (k + 3 < binding->array_size) {
+                     uint32_t o0 = info->pDynamicOffsets[dyn_idx];
+                     uint32_t o1 = info->pDynamicOffsets[dyn_idx + 1];
+                     uint32_t o2 = info->pDynamicOffsets[dyn_idx + 2];
+                     uint32_t o3 = info->pDynamicOffsets[dyn_idx + 3];
+                     uint64_t va0 = src[0] | ((uint64_t)src[1] << 32);
+                     uint64_t va1 = src[2] | ((uint64_t)src[3] << 32);
+                     uint64_t va2 = src[4] | ((uint64_t)src[5] << 32);
+                     uint64_t va3 = src[6] | ((uint64_t)src[7] << 32);
+                     va0 += o0; va1 += o1; va2 += o2; va3 += o3;
+                     dst[0] = (uint32_t)va0; dst[1] = (uint32_t)(va0 >> 32);
+                     dst[2] = (uint32_t)va1; dst[3] = (uint32_t)(va1 >> 32);
+                     dst[4] = (uint32_t)va2; dst[5] = (uint32_t)(va2 >> 32);
+                     dst[6] = (uint32_t)va3; dst[7] = (uint32_t)(va3 >> 32);
+                     k += 4; dyn_idx += 4; src += 8; dst += 8;
+                  }
+                  while (k < binding->array_size) {
+                     uint32_t off = info->pDynamicOffsets[dyn_idx];
+                     uint64_t v = src[0] | ((uint64_t)src[1] << 32);
+                     v += off;
+                     dst[0] = (uint32_t)v; dst[1] = (uint32_t)(v >> 32);
+                     k++; dyn_idx++; src += 2; dst += 2;
+                  }
+                  /* k now exceeds array_size — outer loop terminates */
+                  continue;
+               }
+
+               memcpy(dst, src, binding->size);
+
                if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
                   uint64_t va = src[0] | ((uint64_t)src[1] << 32);
                   va += offset;
                   dst[0] = (uint32_t)va;
-                  dst[1] = (uint32_t)(va >> 32);
-                  if (binding->size > 8)
-                     memcpy(dst + 2, src + 2, binding->size - 8);'''
+                  dst[1] = (uint32_t)(va >> 32);'''
 
-new_j = '''               /* SIMD HERESY D: Neon-like VA patching via AArch64
-                * load-pair + add-with-carry + store-pair.  Avoids libc memcpy
-                * overhead for 8-byte descriptor slots.  For UBO descriptors
-                * (FDL6_TEX_CONST_DWORDS * 4 bytes), unroll Neon copy.
-                *
-                * SIMD HERESY J: Oryon ILP shattering.  The inner loop body
-                * is restructured to issue loads before computation before
-                * stores, breaking the pointer-carried dependency chain that
-                * starves Oryon's 8-wide decode.  Identical ALU ops on
-                * different registers are batched so the dispatch engine sees
-                * zero cross-register hazards and fires them in the same cycle.
-                */
-               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-                  uint64_t va = src[0] | ((uint64_t)src[1] << 32);
-                  va += offset;
-                  dst[0] = (uint32_t)va;
-                  dst[1] = (uint32_t)(va >> 32);
-                  if (binding->size > 8)
-                     memcpy(dst + 2, src + 2, binding->size - 8);'''
-
-cmd = cmd.replace(old_j, new_j, 1)
+cmd = cmd.replace(old_dj, new_dj, 1)
 
 # ===========================================================================
 # HERESY K: DC ZVA — Data Cache Zero by Virtual Address for memset elimination
@@ -569,9 +571,10 @@ new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with intege
     */
    float gb_min_ndc, gb_max_ndc;
    {  /* Integer multiply of raw float bit patterns: (a-b) * rcp */
-      uint32_t diff_bits, rcp_bits, prod_bits;
-      memcpy(&diff_bits, &offset, 4);
-      {  uint32_t gb_bits; memcpy(&gb_bits, &gb_min, 4);
+       uint32_t diff_bits, rcp_bits, prod_bits;
+       memcpy(&rcp_bits, &rcp_scale, 4);
+       memcpy(&diff_bits, &offset, 4);
+       {  uint32_t gb_bits; memcpy(&gb_bits, &gb_min, 4);
          diff_bits = gb_bits - diff_bits; /* raw sub of float bit patterns */
       }
       uint32_t sign = diff_bits & 0x80000000;
