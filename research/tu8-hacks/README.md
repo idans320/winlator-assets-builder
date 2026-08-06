@@ -19,6 +19,7 @@ is a *separate* experimental injection layer applied post-clone.
 | [Go Graph Analysis](analysis/gen8-neuron-paths.md) | Gen8 code site mapping, neuron paths |
 | [Impact Assessment](analysis/impact-metrics.md) | Performance, stability, code quality |
 | [Full Diff](analysis/full-diff.md) | Complete side-by-side diff of all 17 files |
+| [SIMD Heresies](hacks/07-simd-heresies.md) | 9 CPU microarchitecture abuse attacks |
 
 ## Change Matrix
 
@@ -274,7 +275,9 @@ tu8-hacks/
 │   ├── 03-device-spoofing.md          # +35 lines, Deck emu + VK1.3 force
 │   ├── 04-kgsl-wait-robustness.md     # +12 lines, mutex + error handling
 │   ├── 05-minor-fixes.md              # Register rename, target GPU, query simplify
-│   └── 06-apply-all-hacks.md          # Separate script: dirty-shadow, YOLO, etc.
+│   ├── 06-apply-all-hacks.md          # Separate script: dirty-shadow, YOLO, etc.
+│   ├── 07-simd-heresies.md            # CPU microarchitecture abuse (9 attacks)
+│   └── 08-bandwidth-starvation.md     # DRAM bandwidth denial (planned)
 ├── analysis/
 │   ├── gen8-neuron-paths.md           # Go graph: changed code → gen8 sites
 │   ├── impact-metrics.md              # Performance, stability, complexity
