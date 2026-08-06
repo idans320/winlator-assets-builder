@@ -1,8 +1,54 @@
+# Build artifacts
 **/workdir/
-result
+
+# Package outputs
 *.zip
 *.wcp
 mesa_debug_*.log
+
+# Compiled binaries (tests, probes, stubs)
 tests/mesa/test_kgsl_sync
 tests/mesa/test_kgsl_sync_aarch64
 tests/mesa/libstub_kgsl*.so
+research/probes/bench_cube
+research/probes/bench_drawcall
+research/probes/bench_multi
+research/probes/bench_sys
+research/probes/dxvk_probe
+research/probes/loader_probe
+
+# Devbox state
+.devbox/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+research/.venv/
+
+# Research output (generated data)
+research/output/traces/
+research/output/diffs/
+research/output/*.json
+research/output/*.dot
+research/output/*.svg
+
+# update-graphviz output
+update-graphviz/output/
+update-graphviz/.devbox/
+
+# Compiled object/library files
+*.o
+*.a
+*.so
+*.exe
+*.dll
+
+# Build logs
+build_log
+cmake_log
+
+# Temp / scratch
+result
+10.0.0.8
