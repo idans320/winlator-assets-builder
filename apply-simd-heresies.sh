@@ -584,6 +584,7 @@ new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with intege
       memcpy(&gb_min_ndc, &prod_bits, 4);
    }
    {  uint32_t diff_bits, rcp_bits, prod_bits;
+      memcpy(&rcp_bits, &rcp_scale, 4);
       memcpy(&diff_bits, &offset, 4);
       {  uint32_t gb_bits; memcpy(&gb_bits, &gb_max, 4);
          diff_bits = gb_bits - diff_bits;
