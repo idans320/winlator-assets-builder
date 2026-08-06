@@ -40,9 +40,8 @@ mkdir -p "$BUILD_DIR"
 
 if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
     echo "Configuring CMake..."
-    cp "$NDK/build/cmake/android.toolchain.cmake" "$WORKDIR/"
     cmake -B "$BUILD_DIR" -S "$WORKDIR/box64" \
-        -DCMAKE_TOOLCHAIN_FILE="$WORKDIR/android.toolchain.cmake" \
+        -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI=arm64-v8a \
         -DANDROID_PLATFORM="android-$SDK_VER" \
         -DCMAKE_BUILD_TYPE=Release \

@@ -36,8 +36,8 @@ box64:
 
 dxvk:
   description: DXVK GPLAsync-LowLatency — D3D8/9/10/11 Vulkan translation layer
-  repo: https://github.com/Digger1955/dxvk-gplasync-lowlatency.git
-  branch: GPLALL-master-2.7.1
+  repo: https://github.com/Digger1955/dxvk-gplall.git
+  branch: GPLALL-master-2.6.8
   output: "{version}-arm64ec-gplasync.wcp"
   mingw_ver: "20260519"
   preset: elitex
