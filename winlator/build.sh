@@ -29,29 +29,21 @@ echo "Building APK..."
 (
     cd "$BUILD_DIR"
 
-    # Check for Android SDK (set by devbox)
-    if [ -z "$ANDROID_HOME" ] || [ -z "$ANDROID_SDK_ROOT" ]; then
-        ANDROID_SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+    # Nix SDK is read-only — create writable overlay for licenses + sdkmanager
+    WRITABLE_SDK="$WORKDIR/android-sdk-overlay"
+    if [ ! -d "$WRITABLE_SDK/licenses" ]; then
+        mkdir -p "$WRITABLE_SDK/licenses"
+        # Accept SDK licenses into writable directory
+        printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$WRITABLE_SDK/licenses/android-sdk-license"
+        # Symlink SDK components from Nix store
+        for dir in ndk ndk-bundle platform-tools platforms build-tools cmdline-tools tools add-ons; do
+            [ -e "$ANDROID_HOME/$dir" ] && ln -s "$ANDROID_HOME/$dir" "$WRITABLE_SDK/$dir" 2>/dev/null
+        done
     fi
 
-    if [ -n "$ANDROID_SDK_ROOT" ]; then
-        export ANDROID_HOME="$ANDROID_SDK_ROOT"
-        export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
-    fi
-
-    # Point local.properties to the devbox Android SDK
-    echo "sdk.dir=$ANDROID_HOME" > local.properties 2>/dev/null || true
-
-    if [ ! -f "local.properties" ] || ! grep -q "sdk.dir" local.properties; then
-        if [ -n "$ANDROID_HOME" ]; then
-            echo "sdk.dir=$ANDROID_HOME" > local.properties
-        fi
-    fi
-
-    # Accept Android SDK licenses if needed
-    if [ -d "$ANDROID_HOME/cmdline-tools" ] || [ -f "$ANDROID_HOME/tools/bin/sdkmanager" ]; then
-        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-    fi
+    export ANDROID_HOME="$WRITABLE_SDK"
+    export ANDROID_SDK_ROOT="$WRITABLE_SDK"
+    echo "sdk.dir=$ANDROID_HOME" > local.properties
 
     # Find JDK 17+ (required by Android Gradle Plugin 8.x)
     if [ -d "/usr/lib/jvm/java-17-openjdk" ]; then

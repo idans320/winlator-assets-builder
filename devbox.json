@@ -3,6 +3,10 @@
   "packages": [
     "androidenv.androidPkgs.ndk-bundle@latest",
     "androidenv.androidPkgs.platform-tools@latest",
+    "androidenv.androidPkgs.cmdline-tools@latest",
+    "androidenv.androidPkgs.platforms-android-35",
+    "androidenv.androidPkgs.build-tools-35-0-0",
+    "jdk17",
     "python3",
     "python3Packages.pyyaml",
     "python3Packages.mako",
