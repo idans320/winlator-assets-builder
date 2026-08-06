@@ -47,3 +47,9 @@ benchmark:
   sdk_ver: 35
   output: bench-vulkan-{version}.zip
   bench_version: "1.0.0"
+
+winlator:
+  description: Winlator Ludashi fork — Android APK builder
+  repo: https://github.com/StevenMXZ/Winlator-Ludashi.git
+  branch: ludashi-3.1
+  output: winlator-{version}.apk
