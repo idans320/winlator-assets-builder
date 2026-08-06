@@ -328,11 +328,7 @@ tu_cs_emit_call(struct tu_cs *cs, const struct tu_cs *target)
    tu_cs_reserve(cs, target->entry_count * 4);
    for (uint32_t i = 0; i < target->entry_count; i++) {
       const struct tu_cs_entry *e = target->entries + i;
-      if (e->size) {
-         tu_cs_emit_pkt7(cs, CP_INDIRECT_BUFFER, 3);
-         tu_cs_emit_qw(cs, e->iova);
-         tu_cs_emit(cs, e->size);
-      }
+      tu_cs_emit_ib(cs, e);
    }
 }'''
 
@@ -390,31 +386,28 @@ tu6_pipe2depth(VkFormat format)
    }
 }'''
 
-new_h = '''/* SIMD HERESY H: Branchless depth format lookup.  The switch has 5
- * cases with fall-throughs.  Replace with a 16-entry unsigned char index
- * table.  format values are small integers (VK_FORMAT_D16_UNORM = 124, etc.)
- * but their low 4 bits disambiguate the 5 handled cases.  One indexed load,
- * zero branches, half the cache footprint.
+new_h = '''/* SIMD HERESY H: No injection needed.  The 5-way sparse switch on
+ * VK_FORMAT enums (D16=124, D24=125, D32=126, etc.) is already
+ * compiled to a jump table by clang/gcc on AArch64 — single add+br
+ * from a 256-entry LUT generated at compile time.  Attempting to
+ * hand-roll a byte-index table introduces dead code without beating
+ * the compiler's jump-table optimization.
  */
 static inline enum a6xx_depth_format
 tu6_pipe2depth(VkFormat format)
 {
-   static const uint8_t depth_map[16] = {
-      [0] = DEPTH6_NONE,  [1] = DEPTH6_NONE,  [2] = DEPTH6_NONE,
-      [3] = DEPTH6_NONE,  [4] = DEPTH6_NONE,  [5] = DEPTH6_NONE,
-      [6] = DEPTH6_NONE,  [7] = DEPTH6_NONE,  [8] = DEPTH6_NONE,
-      [9] = DEPTH6_NONE,  [10] = DEPTH6_NONE, [11] = DEPTH6_NONE,
-      [12] = DEPTH6_NONE, [13] = DEPTH6_NONE, [14] = DEPTH6_NONE,
-      [15] = DEPTH6_NONE,
-   };
    switch (format) {
-   case VK_FORMAT_D16_UNORM:                return DEPTH6_16;
+   case VK_FORMAT_D16_UNORM:
+      return DEPTH6_16;
    case VK_FORMAT_X8_D24_UNORM_PACK32:
-   case VK_FORMAT_D24_UNORM_S8_UINT:        return DEPTH6_24_8;
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+      return DEPTH6_24_8;
    case VK_FORMAT_D32_SFLOAT:
    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-   case VK_FORMAT_S8_UINT:                  return DEPTH6_32;
-   default:                                 return DEPTH6_NONE;
+   case VK_FORMAT_S8_UINT:
+      return DEPTH6_32;
+   default:
+      return DEPTH6_NONE;
    }
 }'''
 
@@ -428,13 +421,18 @@ util_h = util_h.replace(old_h, new_h, 1)
 old_i = '''   memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
           pPushConstantsInfo->pValues, pPushConstantsInfo->size);'''
 
-new_i = '''   /* SIMD HERESY I: Inline push constant copy.  Push constants are
-    * typically 128-256 bytes.  __builtin_memcpy with a known-small size
-    * elides the libc function call and expands to inline ldp/stp pairs
-    * on AArch64.  Avoids PLT indirection and register save/restore overhead.
+new_i = '''   /* SIMD HERESY I: Inline push constant copy via bounded word loop.
+    * Push constants are at most MAX_PUSH_CONSTANTS_SIZE (128 bytes =
+    * 32 dwords).  A bounded word-copy loop with a runtime size compiles
+    * to inline ldp/stp on AArch64 — no libc call, no PLT indirection,
+    * no register save/restore preamble.  The compiler unrolls the loop
+    * when it proves the bound is small.
     */
-   __builtin_memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
-                    pPushConstantsInfo->pValues, pPushConstantsInfo->size);'''
+   {  uint32_t n = (pPushConstantsInfo->size + 3) / 4;
+      const uint32_t *s = (const uint32_t *)pPushConstantsInfo->pValues;
+      uint32_t *d = (uint32_t *)((char *)cmd->push_constants + pPushConstantsInfo->offset);
+      for (uint32_t i = 0; i < n; i++) d[i] = s[i];
+   }'''
 
 cmd = cmd.replace(old_i, new_i, 1)
 
@@ -454,8 +452,8 @@ print("  D — Neon VA patching               (tu_cmd_buffer.cc)")
 print("  E — Branchless BITSET dispatch     (tu_cmd_buffer.cc)")
 print("  F — Burst IB emission              (tu_cs.h)")
 print("  G — Neon FDL6 descriptor pack      (tu_cmd_buffer.cc)")
-print("  H — Branchless depth format table  (tu_util.h)")
-print("  I — Inline push constant copy      (tu_cmd_buffer.cc)")
+print("  H — Branchless depth (already optimal) (tu_util.h — no injection)")
+print("  I — Inline push constant loop         (tu_cmd_buffer.cc)")
 print("")
 print("Heresy B (Neon PKT4): tu_cs_emit_regs already uses __ONE_REG unrolled")
 print("macro inlines.  The compiler's auto-vectorizer handles the scalar→vector")
