@@ -87,6 +87,11 @@ setup_toolchain() {
     export DLLTOOL="$MINGW_DIR/bin/llvm-dlltool"
 
     NDK_CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    # Use NDK r27 if available (avoids r29 segfault on Snapdragon 8 Elite)
+    if [ -d "/tmp/android-ndk-r27" ]; then
+        NDK_CLANG="/tmp/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        info "Using NDK r27 at $NDK_CLANG"
+    fi
     export NDK_BIN="$NDK_CLANG"
     export TARGET="aarch64-linux-android${SDK_VER}"
     export SYSROOT="$NDK_CLANG/../sysroot"
@@ -106,8 +111,8 @@ apply_16kb_pages() {
     export TARGET="aarch64-linux-android35"
     CPU_FLAGS="$CPU_FLAGS -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES"
     LD_EXTRA="$LD_EXTRA -Wl,-z,max-page-size=16384"
-    export CC="${NDK_BIN}/aarch64-linux-android35-clang"
-    export CXX="${NDK_BIN}/aarch64-linux-android35-clang++"
+    export CC="${NDK_BIN}/aarch64-linux-android28-clang"
+    export CXX="${NDK_BIN}/aarch64-linux-android28-clang++"
     info "16KB page size support enabled"
 }
 
@@ -764,7 +769,7 @@ package_wine() {
     # metadata
     cat > "$PKGDIR/profile.json" << 'PROEOF'
 {
-  "type": "Wine",
+  "type": "Proton",
   "versionName": "11-arm64ec",
   "versionCode": 6,
   "description": "Wine 11 Proton ARM64EC (ESYNC/FSYNC, Oryon optimized)",
