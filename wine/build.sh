@@ -56,7 +56,7 @@ setup_env() {
     HOST_ARCH="$(uname -m)"
     IS_AARCH64=$([ "$HOST_ARCH" = "aarch64" ] && echo 1 || echo 0)
     export IS_AARCH64
-    export WIN_ARCH="arm64ec,aarch64,i386"
+    export WIN_ARCH="aarch64,i386"
     export OUTPUT_DIR="$ROOT_DIR/compiled-files-aarch64"
     export RUNTIME_PATH="/data/data/com.termux/files/usr"
     export install_dir="$WORKDIR/wine-install"
