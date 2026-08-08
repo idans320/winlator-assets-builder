@@ -2,20 +2,17 @@
 # SIMD Heresies — Hostile Microarchitecture Abuse for Mesa Turnip
 # ============================================================================
 # Injects SIMD attacks targeting register hoarding, branch assassination,
-# integer-float mutilation, and vectorized memory operations.
+# and vectorized memory operations.
 #
 # Proven effective on Oryon-1 (Snapdragon X Elite, asm probe):
 #   A  — rbit+clz branchless flush dispatch       -78.4% (6.77→1.46 ns)
 #   DJ — 4-wide horizontal ILP for UBO patching    -13.7% (1.19→1.03 ns)
 #   E  — Branchless BITSET dirty-state check       -13.9% (1.96→1.68 ns)
 #
-# Gated (opt-in via env var, lose in isolation):
-#   C  — Integer exponent guardband                +28.3% (TU_HERESY_C=1)
-#   N  — UMULL integer multiply for guardband     +290.3% (TU_HERESY_N=1)
-#   K  — DC ZVA cache-line zero                   +11.8% (TU_HERESY_K=1)
-#
-# C and N only win when FPU pipeline is heavily contended (mixed workload).
-# K is neutral on Oryon-1; measured no benefit for streaming zero-fill.
+# Removed (lost in isolation, asm probe):
+#   C  — Integer exponent guardband                +28.3%
+#   N  — UMULL integer multiply for guardband     +290.3%
+#   K  — DC ZVA cache-line zero                   +11.8%
 # ============================================================================
 
 set -e
@@ -181,83 +178,10 @@ new_a = '''   BITMASK_ENUM(tu_cmd_flush_bits) flushes = cache->flush_bits;
 cmd = cmd.replace(old_a, new_a, 1)
 
 # ===========================================================================
-# HERESY C: Integer exponent abuse for fd_calc_guardband
-# Replace float division and frexpf with IEEE 754 bit manipulation.
-#
-# PROBE RESULT: +28% slower in isolation (2.56→3.29 ns on Oryon-1).
-# Only useful when FPU pipeline is saturated with other work.
-# Gated behind TU_HERESY_C=1 — opt-in only.
+# HERESY C: Removed — +28% slower in isolation (asm probe).
+# HERESY N: Removed — +290% slower in isolation (asm probe).
+# HERESY K: Removed — +12% neutral (asm probe).
 # ===========================================================================
-if os.getenv('TU_HERESY_C') == '1':
- gb = read(f"{COMMON}/freedreno_guardband.h")
-
- old_c = '''#include <assert.h>
-#include <math.h>
-#include <stdbool.h>'''
-
- new_c = '''#include <assert.h>
-#include <math.h>
-#include <stdbool.h>
-#include <string.h>'''
-
- gb = gb.replace(old_c, new_c, 1)
-
- old_gb = '''   const float gb_min_ndc = (gb_min - offset) / fabsf(scale);
-   const float gb_max_ndc = (gb_max - offset) / fabsf(scale);'''
-
- new_gb = '''   /* SIMD HERESY C: Replace float division with reciprocal-multiply.
-    * Extract the exponent from the IEEE 754 representation of |scale|,
-    * compute 1/|scale| via integer manipulation of the exponent field,
-    * then multiply.  This is Quake III fast inverse: 2-cycle integer ops
-    * instead of 10-cycle hardware float division.
-    */
-   float abs_scale, rcp_scale;
-   {  uint32_t bits; memcpy(&bits, &scale, 4);
-      bits &= 0x7FFFFFFF;          /* fabsf via sign-bit clear */
-      memcpy(&abs_scale, &bits, 4);
-      /* Fast reciprocal: exponent = 253 - exponent  (253 = 127*2 - 1) */
-      bits = (bits & 0x807FFFFF) | ((253u - ((bits >> 23) & 0xFF)) << 23);
-      memcpy(&rcp_scale, &bits, 4);
-   }
-   const float gb_min_ndc = (gb_min - offset) * rcp_scale;
-   const float gb_max_ndc = (gb_max - offset) * rcp_scale;'''
-
- gb = gb.replace(old_gb, new_gb, 1)
-
- old_frexp = '''   int gb_adj_exp;
-   float gb_adj_mantissa = frexpf(gb_adj, &gb_adj_exp);'''
-
- new_frexp = '''   /* SIMD HERESY C cont'd: Replace frexpf() hardware decompose
-    * with direct IEEE 754 exponent bit-field extraction.  frexpf costs
-    * ~5 cycles; bit extraction is 1 cycle.
-    */
-   int gb_adj_exp;
-   float gb_adj_mantissa;
-   {  uint32_t bits; memcpy(&bits, &gb_adj, 4);
-      gb_adj_exp = ((int)(bits >> 23) & 0xFF) - 126;
-      bits = (bits & 0x807FFFFF) | (126 << 23);  /* clamp mantissa exponent to 2^0 */
-      memcpy(&gb_adj_mantissa, &bits, 4);
-   }'''
-
- gb = gb.replace(old_frexp, new_frexp, 1)
-
- old_trunc = '''   return ((gb_adj_exp - 1) << 6) |
-          ((unsigned)truncf(gb_adj_mantissa * (1 << 7)) - (1 << 6));'''
-
- new_trunc = '''   /* SIMD HERESY C cont'd: Replace truncf(float) with direct
-    * integer conversion of the scaled mantissa.  Avoids the float→int
-    * rounding-mode hardware path.
-    */
-   {  uint32_t mantissa_scaled = (uint32_t)(gb_adj_mantissa * (1 << 7));
-      return ((gb_adj_exp - 1) << 6) | (mantissa_scaled - (1 << 6));
-   }'''
-
- gb = gb.replace(old_trunc, new_trunc, 1)
-
- write(f"{COMMON}/freedreno_guardband.h", gb)
-else:
- print("  C — SKIPPED (+28% in isolation, set TU_HERESY_C=1 for FPU contention relief)")
-
 # ===========================================================================
 # HERESY D (NEON VA patching): Merged into Heresy DJ below.
 # Heresy DJ does 4-wide ILP + removes memcpy — this section is now a no-op.
@@ -491,130 +415,6 @@ new_dj = '''               /* SIMD HERESY D+J: 4-wide horizontal UBO VA patching
 cmd = cmd.replace(old_dj, new_dj, 1)
 
 # ===========================================================================
-# HERESY K: DC ZVA — Data Cache Zero by Virtual Address for memset elimination
-#
-# PROBE RESULT: +12% slower in isolation (1.54→1.72 ns on Oryon-1).
-# DC ZVA is nominally neutral on this chip for streaming zero-fill.
-# Gated behind TU_HERESY_K=1 — opt-in only.
-# ===========================================================================
-if os.getenv('TU_HERESY_K') == '1':
- dczva_header = '''
-/* SIMD HERESY K: DC ZVA helper.  Zeros a cache-line-aligned region of
- * memory using the DC ZVA (Data Cache Zero by Virtual Address) instruction.
- * DC ZVA tells the L2/L3 cache controller to instantiate a zero-filled
- * cache line without a DRAM fetch.  No ALU store instructions needed.
- * Requires: pointer aligned to DCZID_EL0 block size (64 bytes on Oryon),
- * size a multiple of that block size, memory in Normal Cacheable mapping.
- */
-#if defined(__aarch64__)
-static inline void tu_dczva(void *ptr, size_t size) {
-   uint64_t block_size;
-   __asm__ volatile("mrs %0, dczid_el0" : "=r"(block_size));
-   block_size = 4u << (block_size & 0xf);
-   uintptr_t addr = (uintptr_t)ptr;
-   uintptr_t end = addr + size;
-   for (; addr < end; addr += block_size) {
-      __asm__ volatile("dc zva, %0" :: "r"(addr) : "memory");
-   }
-}
-#else
-#define tu_dczva(ptr, size) memset(ptr, 0, size)
-#endif
-'''
-
- # Inject DCZVA after tu_cs.h includes
- cs_h_old = '''#include "tu_knl.h"
-
-/* For breadcrumbs we may open a network socket based on the envvar,'''
-
- cs_h_new = '#include "tu_knl.h"\n\n' + dczva_header + '\n' + '/* For breadcrumbs we may open a network socket based on the envvar,'
-
- cs_h = cs_h.replace(cs_h_old, cs_h_new, 1)
-
- # Now replace the large descriptor-set memset in tu_descriptor_set.cc
- # Target: memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
- desc = read(f"{VULKAN}/tu_descriptor_set.cc")
-
- old_dczva = '''   memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));'''
-
- new_dczva = '''   /* SIMD HERESY K: DC ZVA — zero descriptor entries via cache
-    * controller instead of NEON store instructions.  FDL6_TEX_CONST_DWORDS is
-    * typically 32 (128 bytes), so 2 cache lines per descriptor.  The cache
-    * controller zeroes them in L2 without ALU involvement or DRAM fetches.
-    * Fall back to memset when size < cache line or alignment unknown.
-    */
-   {  size_t zsize = num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t);
-      if (zsize >= 64) {
-         tu_dczva(dst, zsize & ~(size_t)63);
-         if (zsize & 63)
-            memset((char *)dst + (zsize & ~(size_t)63), 0, zsize & 63);
-      } else {
-         memset(dst, 0, zsize);
-      }
-   }'''
-
- desc = desc.replace(old_dczva, new_dczva, 1)
-
- write(f"{VULKAN}/tu_descriptor_set.cc", desc)
-else:
- print("  K — SKIPPED (+12% in isolation, set TU_HERESY_K=1 to enable DC ZVA)")
-
-# ===========================================================================
-# HERESY N: UMULL — Integer multiply for guardband instead of FPU fmul
-#
-# PROBE RESULT: +290% slower in isolation (0.67→2.63 ns on Oryon-1).
-# The integer path is 4x more expensive per multiply.  Only worth it when
-# the FPU pipeline is heavily contended and you need to offload work.
-# Gated behind TU_HERESY_N=1 — opt-in only, STRONG WARNING.
-# ===========================================================================
-if os.getenv('TU_HERESY_N') == '1':
- gn = read(f"{COMMON}/freedreno_guardband.h")
-
- old_umull = '''   const float gb_min_ndc = (gb_min - offset) * rcp_scale;
-   const float gb_max_ndc = (gb_max - offset) * rcp_scale;'''
-
- new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with integer
-    * multiply on raw IEEE 754 bit patterns.  The float subtraction computes
-    * (gb_min-offset), then the multiply-by-rcp is done as integer UMULL
-    * on the raw bit representations.  The result is a distorted but
-    * structurally consistent product — correct enough for guardband clamping
-    * which only needs monotonic ordering, not IEEE 754 precision.
-    * Executes entirely in integer ALUs, zero FPU stalls.
-    */
-   float gb_min_ndc, gb_max_ndc;
-   {  /* Integer multiply of raw float bit patterns: (a-b) * rcp */
-       uint32_t diff_bits, rcp_bits, prod_bits;
-       memcpy(&rcp_bits, &rcp_scale, 4);
-       memcpy(&diff_bits, &offset, 4);
-       {  uint32_t gb_bits; memcpy(&gb_bits, &gb_min, 4);
-         diff_bits = gb_bits - diff_bits; /* raw sub of float bit patterns */
-      }
-      uint32_t sign = diff_bits & 0x80000000;
-      diff_bits &= 0x7FFFFFFF;
-      prod_bits = (uint32_t)(((uint64_t)diff_bits * (uint64_t)rcp_bits) >> 23);
-      prod_bits |= sign;
-      memcpy(&gb_min_ndc, &prod_bits, 4);
-   }
-   {  uint32_t diff_bits, rcp_bits, prod_bits;
-      memcpy(&rcp_bits, &rcp_scale, 4);
-      memcpy(&diff_bits, &offset, 4);
-      {  uint32_t gb_bits; memcpy(&gb_bits, &gb_max, 4);
-         diff_bits = gb_bits - diff_bits;
-      }
-      uint32_t sign = diff_bits & 0x80000000;
-      diff_bits &= 0x7FFFFFFF;
-      prod_bits = (uint32_t)(((uint64_t)diff_bits * (uint64_t)rcp_bits) >> 23);
-      prod_bits |= sign;
-      memcpy(&gb_max_ndc, &prod_bits, 4);
-   }'''
-
- gn = gn.replace(old_umull, new_umull, 1)
-
- write(f"{COMMON}/freedreno_guardband.h", gn)
-else:
- print("  N — SKIPPED (+290% in isolation, set TU_HERESY_N=1 only if FPU-saturated)")
-
-# ===========================================================================
 # HERESY O: PRFM prefetch injection
 # Tell Oryon's hardware stride prefetcher to warm L1 cache ahead of the
 # descriptor walk.  On an 8-wide decode with deep OoO window, the prefetch
@@ -698,7 +498,6 @@ write(f"{VULKAN}/tu_util.h", util_h)
 print("SIMD Heresies applied:")
 print("  A — Branchless flush dispatch           (tu_cmd_buffer.cc)      [-78% proven]")
 print("  B — Neon vector PKT4 emission           (tu_cs.h — native unroll)")
-print(f"  C — Integer exponent guardband          (freedreno_guardband.h) {'ON (+28% penalty)' if os.getenv('TU_HERESY_C')=='1' else 'OFF (set TU_HERESY_C=1)'}")
 print("  D — Neon VA patching                    (tu_cmd_buffer.cc)")
 print("  E — Branchless BITSET dispatch          (tu_cmd_buffer.cc)      [-14% proven]")
 print("  F — Burst IB emission                   (tu_cs.h)")
@@ -706,11 +505,10 @@ print("  G — Neon FDL6 descriptor pack           (tu_cmd_buffer.cc)")
 print("  H — Branchless depth (already optimal)  (tu_util.h — no injection)")
 print("  I — Inline push constant loop           (tu_cmd_buffer.cc)")
 print("  J — Oryon ILP horizontal interleave     (tu_cmd_buffer.cc)      [-14% proven]")
-print(f"  K — DC ZVA: cache-line zero             (tu_cs.h, tu_descriptor_set.cc) {'ON (+12% penalty)' if os.getenv('TU_HERESY_K')=='1' else 'OFF (set TU_HERESY_K=1)'}")
-print(f"  N — UMULL: integer mul for guardband    (freedreno_guardband.h) {'ON (+290% penalty)' if os.getenv('TU_HERESY_N')=='1' else 'OFF (set TU_HERESY_N=1)'}")
 print("  O — PRFM PLDL1KEEP prefetch             (tu_cmd_buffer.cc, tu_cs.h)")
 print("  P — Static-offset LDP/STP asm macro     (tu_cs.h, tu_cmd_buffer.cc)")
 print("")
+print("Removed (asm probe: lose in isolation): C +28%, N +290%, K +12%")
 print("Heresy L (PAC stripping): PAC disabled at NDK build level — no-op.")
 print("Heresy M (Post-index): Compiler chooses static vs post-index addressing")
 print("  from our unrolled loop structure — no source-level injection needed.")

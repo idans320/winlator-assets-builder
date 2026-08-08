@@ -9,10 +9,7 @@
 #   DJ — 4-wide ILP UBO patching           -13.7%
 #   E  — Branchless BITSET dispatch        -13.9%
 #
-# Opt-in heresies (set env var to enable):
-#   TU_HERESY_C=1  — integer guardband reciprocal    (+28% in isolation)
-#   TU_HERESY_N=1  — UMULL integer guardband multiply (+290% in isolation)
-#   TU_HERESY_K=1  — DC ZVA cache-line zero          (+12% in isolation)
+# Removed (lose in isolation): C (+28%), N (+290%), K (+12%)
 #
 # GPU bandwidth attacks (VRS 4x4 + LOD bias +4.0) are unconditional.
 # ============================================================================
