@@ -480,7 +480,8 @@ fixup_makefile() {
     echo "Disabling winedmo Unix build (no ffmpeg)..."
     sed -i '/dlls\/winedmo\/winedmo.so:/,/^$/d' Makefile
     sed -i '/winedmo\/winedmo.so/d' Makefile
-    echo "Fixing preloader LDFLAGS for LLD 21..."
+    # -Wl,-Ttext=0x7d400000 produces 2GB sparse ELF with LLD 21.
+    # build_preloader() uses --image-base instead (compact output).
     sed -i 's|-Wl,-Ttext=0x7d400000||g' Makefile
 }
 
