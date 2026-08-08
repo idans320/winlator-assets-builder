@@ -1,19 +1,22 @@
 #!/bin/bash -e
 # SIMD Heresies — Hostile Microarchitecture Abuse for Mesa Turnip
 # ============================================================================
-# Injects 9 SIMD attacks targeting register hoarding, branch assassination,
+# Injects SIMD attacks targeting register hoarding, branch assassination,
 # integer-float mutilation, and vectorized memory operations.
 #
-# Each heresy is unconditionally applied. This is a hack branch.
-#   A — Branchless flush dispatch (in tu6_emit_flushes)
-#   B — Neon vector store for tu_cs_emit_regs PKT4 emission
-#   C — Integer exponent abuse for fd_calc_guardband
-#   D — Dynamic descriptor VA patching with ARM load-pair+add-with-carry
-#   E — Vectorized BITSET dirty-state checks
-#   F — Burst IB chain emission (memcpy instead of scalar loop)
-#   G — Neon FDL6 input attachment descriptor packing
-#   H — Branchless depth format lookup table
-#   I — Inline Neon push constant memcpy
+# Proven effective on Oryon-1 (Snapdragon X Elite, asm probe):
+#   A  — rbit+clz branchless flush dispatch       -78.4% (6.77→1.46 ns)
+#   DJ — 4-wide horizontal ILP for UBO patching    -13.7% (1.19→1.03 ns)
+#   E  — Branchless BITSET dirty-state check       -13.9% (1.96→1.68 ns)
+#
+# Gated (opt-in via env var, lose in isolation):
+#   C  — Integer exponent guardband                +28.3% (TU_HERESY_C=1)
+#   N  — UMULL integer multiply for guardband     +290.3% (TU_HERESY_N=1)
+#   K  — DC ZVA cache-line zero                   +11.8% (TU_HERESY_K=1)
+#
+# C and N only win when FPU pipeline is heavily contended (mixed workload).
+# K is neutral on Oryon-1; measured no benefit for streaming zero-fill.
+# ============================================================================
 
 set -e
 cd "$(dirname "$0")/mesa/workdir/mesa"
@@ -180,24 +183,29 @@ cmd = cmd.replace(old_a, new_a, 1)
 # ===========================================================================
 # HERESY C: Integer exponent abuse for fd_calc_guardband
 # Replace float division and frexpf with IEEE 754 bit manipulation.
+#
+# PROBE RESULT: +28% slower in isolation (2.56→3.29 ns on Oryon-1).
+# Only useful when FPU pipeline is saturated with other work.
+# Gated behind TU_HERESY_C=1 — opt-in only.
 # ===========================================================================
-gb = read(f"{COMMON}/freedreno_guardband.h")
+if os.getenv('TU_HERESY_C') == '1':
+ gb = read(f"{COMMON}/freedreno_guardband.h")
 
-old_c = '''#include <assert.h>
+ old_c = '''#include <assert.h>
 #include <math.h>
 #include <stdbool.h>'''
 
-new_c = '''#include <assert.h>
+ new_c = '''#include <assert.h>
 #include <math.h>
 #include <stdbool.h>
 #include <string.h>'''
 
-gb = gb.replace(old_c, new_c, 1)
+ gb = gb.replace(old_c, new_c, 1)
 
-old_gb = '''   const float gb_min_ndc = (gb_min - offset) / fabsf(scale);
+ old_gb = '''   const float gb_min_ndc = (gb_min - offset) / fabsf(scale);
    const float gb_max_ndc = (gb_max - offset) / fabsf(scale);'''
 
-new_gb = '''   /* SIMD HERESY C: Replace float division with reciprocal-multiply.
+ new_gb = '''   /* SIMD HERESY C: Replace float division with reciprocal-multiply.
     * Extract the exponent from the IEEE 754 representation of |scale|,
     * compute 1/|scale| via integer manipulation of the exponent field,
     * then multiply.  This is Quake III fast inverse: 2-cycle integer ops
@@ -214,12 +222,12 @@ new_gb = '''   /* SIMD HERESY C: Replace float division with reciprocal-multiply
    const float gb_min_ndc = (gb_min - offset) * rcp_scale;
    const float gb_max_ndc = (gb_max - offset) * rcp_scale;'''
 
-gb = gb.replace(old_gb, new_gb, 1)
+ gb = gb.replace(old_gb, new_gb, 1)
 
-old_frexp = '''   int gb_adj_exp;
+ old_frexp = '''   int gb_adj_exp;
    float gb_adj_mantissa = frexpf(gb_adj, &gb_adj_exp);'''
 
-new_frexp = '''   /* SIMD HERESY C cont'd: Replace frexpf() hardware decompose
+ new_frexp = '''   /* SIMD HERESY C cont'd: Replace frexpf() hardware decompose
     * with direct IEEE 754 exponent bit-field extraction.  frexpf costs
     * ~5 cycles; bit extraction is 1 cycle.
     */
@@ -231,12 +239,12 @@ new_frexp = '''   /* SIMD HERESY C cont'd: Replace frexpf() hardware decompose
       memcpy(&gb_adj_mantissa, &bits, 4);
    }'''
 
-gb = gb.replace(old_frexp, new_frexp, 1)
+ gb = gb.replace(old_frexp, new_frexp, 1)
 
-old_trunc = '''   return ((gb_adj_exp - 1) << 6) |
+ old_trunc = '''   return ((gb_adj_exp - 1) << 6) |
           ((unsigned)truncf(gb_adj_mantissa * (1 << 7)) - (1 << 6));'''
 
-new_trunc = '''   /* SIMD HERESY C cont'd: Replace truncf(float) with direct
+ new_trunc = '''   /* SIMD HERESY C cont'd: Replace truncf(float) with direct
     * integer conversion of the scaled mantissa.  Avoids the float→int
     * rounding-mode hardware path.
     */
@@ -244,9 +252,11 @@ new_trunc = '''   /* SIMD HERESY C cont'd: Replace truncf(float) with direct
       return ((gb_adj_exp - 1) << 6) | (mantissa_scaled - (1 << 6));
    }'''
 
-gb = gb.replace(old_trunc, new_trunc, 1)
+ gb = gb.replace(old_trunc, new_trunc, 1)
 
-write(f"{COMMON}/freedreno_guardband.h", gb)
+ write(f"{COMMON}/freedreno_guardband.h", gb)
+else:
+ print("  C — SKIPPED (+28% in isolation, set TU_HERESY_C=1 for FPU contention relief)")
 
 # ===========================================================================
 # HERESY D (NEON VA patching): Merged into Heresy DJ below.
@@ -482,13 +492,13 @@ cmd = cmd.replace(old_dj, new_dj, 1)
 
 # ===========================================================================
 # HERESY K: DC ZVA — Data Cache Zero by Virtual Address for memset elimination
-# Add a DCZVA helper macro to tu_cs.h, then replace large descriptor-set
-# memsets in tu_descriptor_set.cc with DC ZVA when pointer is aligned and
-# size is a cache-line multiple.  DC ZVA tells the L2 controller to zero
-# a cache line directly in cache without fetching garbage from DRAM and
-# without burning ALU cycles on store instructions.
+#
+# PROBE RESULT: +12% slower in isolation (1.54→1.72 ns on Oryon-1).
+# DC ZVA is nominally neutral on this chip for streaming zero-fill.
+# Gated behind TU_HERESY_K=1 — opt-in only.
 # ===========================================================================
-dczva_header = '''
+if os.getenv('TU_HERESY_K') == '1':
+ dczva_header = '''
 /* SIMD HERESY K: DC ZVA helper.  Zeros a cache-line-aligned region of
  * memory using the DC ZVA (Data Cache Zero by Virtual Address) instruction.
  * DC ZVA tells the L2/L3 cache controller to instantiate a zero-filled
@@ -512,22 +522,22 @@ static inline void tu_dczva(void *ptr, size_t size) {
 #endif
 '''
 
-# Inject DCZVA after tu_cs.h includes
-cs_h_old = '''#include "tu_knl.h"
+ # Inject DCZVA after tu_cs.h includes
+ cs_h_old = '''#include "tu_knl.h"
 
 /* For breadcrumbs we may open a network socket based on the envvar,'''
 
-cs_h_new = '#include "tu_knl.h"\n\n' + dczva_header + '\n' + '/* For breadcrumbs we may open a network socket based on the envvar,'
+ cs_h_new = '#include "tu_knl.h"\n\n' + dczva_header + '\n' + '/* For breadcrumbs we may open a network socket based on the envvar,'
 
-cs_h = cs_h.replace(cs_h_old, cs_h_new, 1)
+ cs_h = cs_h.replace(cs_h_old, cs_h_new, 1)
 
-# Now replace the large descriptor-set memset in tu_descriptor_set.cc
-# Target: memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
-desc = read(f"{VULKAN}/tu_descriptor_set.cc")
+ # Now replace the large descriptor-set memset in tu_descriptor_set.cc
+ # Target: memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
+ desc = read(f"{VULKAN}/tu_descriptor_set.cc")
 
-old_dczva = '''   memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));'''
+ old_dczva = '''   memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));'''
 
-new_dczva = '''   /* SIMD HERESY K: DC ZVA — zero descriptor entries via cache
+ new_dczva = '''   /* SIMD HERESY K: DC ZVA — zero descriptor entries via cache
     * controller instead of NEON store instructions.  FDL6_TEX_CONST_DWORDS is
     * typically 32 (128 bytes), so 2 cache lines per descriptor.  The cache
     * controller zeroes them in L2 without ALU involvement or DRAM fetches.
@@ -543,25 +553,27 @@ new_dczva = '''   /* SIMD HERESY K: DC ZVA — zero descriptor entries via cache
       }
    }'''
 
-desc = desc.replace(old_dczva, new_dczva, 1)
+ desc = desc.replace(old_dczva, new_dczva, 1)
 
-write(f"{VULKAN}/tu_descriptor_set.cc", desc)
+ write(f"{VULKAN}/tu_descriptor_set.cc", desc)
+else:
+ print("  K — SKIPPED (+12% in isolation, set TU_HERESY_K=1 to enable DC ZVA)")
 
 # ===========================================================================
 # HERESY N: UMULL — Integer multiply for guardband instead of FPU fmul
-# fd_calc_guardband already replaced division and frexpf with bit ops
-# (Heresy C).  The remaining (gb_min - offset) * rcp_scale is still a
-# float multiply.  Convert both operands to raw integer bit patterns and
-# use integer multiply instead, bypassing the FPU entirely.
-# On Oryon, UMULL executes in the integer ALU pipeline, avoiding FPU
-# context switches and rounding-mode stalls.
+#
+# PROBE RESULT: +290% slower in isolation (0.67→2.63 ns on Oryon-1).
+# The integer path is 4x more expensive per multiply.  Only worth it when
+# the FPU pipeline is heavily contended and you need to offload work.
+# Gated behind TU_HERESY_N=1 — opt-in only, STRONG WARNING.
 # ===========================================================================
-gn = read(f"{COMMON}/freedreno_guardband.h")
+if os.getenv('TU_HERESY_N') == '1':
+ gn = read(f"{COMMON}/freedreno_guardband.h")
 
-old_umull = '''   const float gb_min_ndc = (gb_min - offset) * rcp_scale;
+ old_umull = '''   const float gb_min_ndc = (gb_min - offset) * rcp_scale;
    const float gb_max_ndc = (gb_max - offset) * rcp_scale;'''
 
-new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with integer
+ new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with integer
     * multiply on raw IEEE 754 bit patterns.  The float subtraction computes
     * (gb_min-offset), then the multiply-by-rcp is done as integer UMULL
     * on the raw bit representations.  The result is a distorted but
@@ -596,9 +608,11 @@ new_umull = '''   /* SIMD HERESY N: UMULL — replace float multiply with intege
       memcpy(&gb_max_ndc, &prod_bits, 4);
    }'''
 
-gn = gn.replace(old_umull, new_umull, 1)
+ gn = gn.replace(old_umull, new_umull, 1)
 
-write(f"{COMMON}/freedreno_guardband.h", gn)
+ write(f"{COMMON}/freedreno_guardband.h", gn)
+else:
+ print("  N — SKIPPED (+290% in isolation, set TU_HERESY_N=1 only if FPU-saturated)")
 
 # ===========================================================================
 # HERESY O: PRFM prefetch injection
@@ -682,18 +696,18 @@ write(f"{VULKAN}/tu_cs.h", cs_h)
 write(f"{VULKAN}/tu_util.h", util_h)
 
 print("SIMD Heresies applied:")
-print("  A — Branchless flush dispatch           (tu_cmd_buffer.cc)")
+print("  A — Branchless flush dispatch           (tu_cmd_buffer.cc)      [-78% proven]")
 print("  B — Neon vector PKT4 emission           (tu_cs.h — native unroll)")
-print("  C — Integer exponent guardband          (freedreno_guardband.h)")
+print(f"  C — Integer exponent guardband          (freedreno_guardband.h) {'ON (+28% penalty)' if os.getenv('TU_HERESY_C')=='1' else 'OFF (set TU_HERESY_C=1)'}")
 print("  D — Neon VA patching                    (tu_cmd_buffer.cc)")
-print("  E — Branchless BITSET dispatch          (tu_cmd_buffer.cc)")
+print("  E — Branchless BITSET dispatch          (tu_cmd_buffer.cc)      [-14% proven]")
 print("  F — Burst IB emission                   (tu_cs.h)")
 print("  G — Neon FDL6 descriptor pack           (tu_cmd_buffer.cc)")
 print("  H — Branchless depth (already optimal)  (tu_util.h — no injection)")
 print("  I — Inline push constant loop           (tu_cmd_buffer.cc)")
-print("  J — Oryon ILP horizontal interleave     (tu_cmd_buffer.cc)")
-print("  K — DC ZVA: cache-line zero in L2       (tu_cs.h, tu_descriptor_set.cc)")
-print("  N — UMULL: integer multiply for guardband (freedreno_guardband.h)")
+print("  J — Oryon ILP horizontal interleave     (tu_cmd_buffer.cc)      [-14% proven]")
+print(f"  K — DC ZVA: cache-line zero             (tu_cs.h, tu_descriptor_set.cc) {'ON (+12% penalty)' if os.getenv('TU_HERESY_K')=='1' else 'OFF (set TU_HERESY_K=1)'}")
+print(f"  N — UMULL: integer mul for guardband    (freedreno_guardband.h) {'ON (+290% penalty)' if os.getenv('TU_HERESY_N')=='1' else 'OFF (set TU_HERESY_N=1)'}")
 print("  O — PRFM PLDL1KEEP prefetch             (tu_cmd_buffer.cc, tu_cs.h)")
 print("  P — Static-offset LDP/STP asm macro     (tu_cs.h, tu_cmd_buffer.cc)")
 print("")
