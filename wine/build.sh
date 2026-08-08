@@ -480,8 +480,6 @@ fixup_makefile() {
     echo "Disabling winedmo Unix build (no ffmpeg)..."
     sed -i '/dlls\/winedmo\/winedmo.so:/,/^$/d' Makefile
     sed -i '/winedmo\/winedmo.so/d' Makefile
-    echo "Fixing preloader LDFLAGS for LLD 21..."
-    sed -i 's|-Wl,-Ttext=0x7d400000||g' Makefile
 }
 
 # ── build ─────────────────────────────────────────────────────
@@ -521,7 +519,7 @@ build_wine() {
 
 build_aarch64_unix_libs() {
     echo "Building aarch64-unix libraries..."
-    rm -f server/fsync.o server/wineserver loader/main.o loader/wine loader/wine-preloader
+    rm -f server/fsync.o server/wineserver loader/main.o loader/wine
     make -j"$WINE_JOBS" server/wineserver loader/wine 2>&1 | tee -a "$WORKDIR/build_log"
 
     grep "\.so:" Makefile | grep -v "i386-\|x86_64-\|aarch64-windows\|arm64ec-" | awk -F: '{print $1}' | while IFS= read -r so_target; do
@@ -530,7 +528,6 @@ build_aarch64_unix_libs() {
 
     build_winex11_so
     build_wine_loader
-    build_preloader
     build_wineserver
     build_missing_so
     info "Unix libraries build complete"
@@ -557,18 +554,6 @@ build_wine_loader() {
         -I$DEPS/include --sysroot="$SYSROOT" $CFLAGS 2>&1 | tee -a "$WORKDIR/build_log"
     $CC -std=gnu23 -o loader/wine loader/main.o \
         -Wl,--export-dynamic -Wl,-pie $LDFLAGS 2>&1 | tee -a "$WORKDIR/build_log"
-}
-
-build_preloader() {
-    echo "Building loader/wine-preloader with custom linker script..."
-    $CC -std=gnu23 -c -o loader/preloader.o loader/preloader.c -Iloader -Iinclude \
-        -D__WINESRC__ -fno-builtin -Wall -pipe \
-        -fcf-protection=none -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
-        -I$DEPS/include --sysroot="$SYSROOT" $CFLAGS 2>&1 | tee -a "$WORKDIR/build_log"
-    $CC -std=gnu23 -static -nostartfiles -nodefaultlibs \
-        -Wl,--image-base=0x7d400000 \
-        -o loader/wine-preloader loader/preloader.o \
-        2>&1 | tee -a "$WORKDIR/build_log"
 }
 
 build_wineserver() {
