@@ -1,5 +1,96 @@
 # Building Wine ARM64EC for Winlator Cmod
 
+## Notes to the Future Adventurer
+
+Greetings. If you are reading this, you have inherited this build system
+and need to compile a new Wine version. I am sorry. I wrote this so you
+don't have to spend three days bisecting linker flags and staring at
+hex dumps of PE headers at 2 AM. It cost me that. You get it for free.
+
+**The golden rule of this dungeon:** Wine on Android ARM64EC is held
+together by approximately 50 patches, three separate compiler toolchains,
+and a cascade of linker workarounds. Change one thing anywhere in the
+pipeline and six things break, usually with the most unhelpful error
+code you've ever seen (`c00000bb` = "something unsupported, good luck").
+
+### What you're looking at
+
+You are cross-compiling **Wine** (a largely x86-oriented Windows
+compatibility layer) for **ARM64 Android**, with **ARM64EC** (a bleeding-edge
+subsystem that runs x86_64 Windows executables inside ARM64 processes), using
+**LLVM/Clang** (which behaves slightly differently from GNU binutils in ways
+that only manifest as cryptic segfaults), packaged into a **Winlator Cmod**
+container that has very firm opinions about directory layouts.
+
+### The mental model
+
+Every problem in this build falls into one of four categories:
+
+1. **Preloader address space.** Wine's preloader MUST load at virtual
+   address 0x7d400000. LLD puts file offsets *at the same address as VMAs*, 
+   creating a 2 GB sparse ELF file that looks correct but doesn't work.
+   The fix (`--image-base`) is unintuitive and poorly documented.
+   *Read Section 4 before touching any linker flag.*
+
+2. **ARM64EC = invisible architecture.** You configure Wine with
+   `--enable-archs=arm64ec,aarch64,i386` but **no `arm64ec-windows/` directory
+   gets created**. ARM64EC rewires the aarch64 PE DLLs internally with
+   `.hexpthk` and `.a64xrm` sections. If you accidentally create empty
+   arm64ec directories in the package, Winlator silently fails to create
+   containers. If you omit arm64ec from WIN_ARCH, you get `4000000e`
+   machine type mismatches on every PE load.
+
+3. **Patches are stateful.** The source tree has 45 patches in
+   `android/patches/` and 3 in `wine/patches/`. Some are already applied
+   to the source. Some aren't. If you clean the build tree but don't
+   re-apply them in the right order, you get compile errors that make
+   no sense. The script is hardened to skip already-applied patches,
+   but the *order matters* for `server_protocol.def.patch` which must
+   run before `autoreconf`.
+
+4. **The device is a different universe from qemu.** You can test
+   `wine --version` locally under qemu-aarch64-static. You cannot test
+   `wine winecfg` or any GUI process — qemu's address space is too
+   constrained. The final test is always `adb push` + `run-as`.
+   Accept this early.
+
+### Before you change anything
+
+```bash
+readelf -l workdir/wine/loader/wine-preloader | grep 0x7d400000   # must exist
+readelf -d workdir/wine/dlls/ntdll/ntdll.so | grep RUNPATH        # must be empty
+tar -tJf wine-arm64-*.wcp | grep arm64ec                           # must be empty
+```
+
+If any of these fail, stop. Go back. The build is lying to you.
+
+### The commits you need to understand
+
+```
+77de6a0  wine: fix Proton 11 ARM64EC build — preloader, patches, packaging
+1598e2c  wine: document why preloader needs manual --image-base rebuild
+```
+
+These two commits contain everything that was wrong and how it was fixed.
+Read their messages and diffs before assuming something "should just work."
+
+### If you're reading this after 3 days of debugging
+
+You are not alone. This build cost me approximately:
+- 4 complete reclones from scratch
+- 30+ adb push cycles
+- 6 different Winlator container reinstalls
+- 2 linker scripts that silently produced wrong output
+- 1 night of staring at qemu-strace output
+- Countless hours of incremental despair
+
+The fix was ultimately 4 lines of bash changes and removing an inverted
+early-return check. It always is.
+
+Good luck, adventurer. The dungeon rewards those who read the docs.
+
+---
+
 This is a living document of everything learned during the Proton 11 build.
 It assumes Wine 12 will have the same class of problems. Read before you compile.
 
