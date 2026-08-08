@@ -2,7 +2,7 @@ mesa:
   description: Mesa Turnip Vulkan driver for Adreno/KGSL
   repo: https://github.com/whitebelyash/mesa-unified.git
   branch: turnip/gen8
-  output: mesa-{version}.zip
+  output: mesa-turnip-{version}.zip
   sdk_ver: 35
   buildtype: release
   localPatches: mesa/patches

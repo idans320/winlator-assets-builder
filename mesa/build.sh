@@ -143,12 +143,13 @@ cp "$DRIVER_SO" "$PKGDIR/vulkan.turnip.so"
 if [ "$MESA_BUILD_TYPE" != "release" ]; then
     MESA_VERSION="${MESA_VERSION}-${MESA_BUILD_TYPE}"
 fi
+MESA_VERSION="${MESA_VERSION}-experimental"
 
 cat > "$PKGDIR/meta.json" << METAEOF
 {
   "schemaVersion": 1,
-  "name": "Mesa Turnip Driver $MESA_VERSION",
-  "description": "Freedreno Turnip Vulkan driver for Android — Mesa $MESA_VERSION, Vulkan $VK_API_VERSION, KGSL (build: $MESA_BUILD_TYPE)",
+  "name": "Mesa Turnip $MESA_VERSION",
+  "description": "Freedreno Turnip Vulkan driver — SIMD heresies + bandwidth lite, Oryon optimized, Mesa $MESA_VERSION, Vulkan $VK_API_VERSION (build: $MESA_BUILD_TYPE)",
   "author": "Mesa",
   "packageVersion": "$MESA_VERSION",
   "vendor": "Mesa",

@@ -188,16 +188,36 @@ If active state exceeds 96 KB, L1 thrashing begins.
 
 ---
 
-## Implementation Priority
+## Implementation Priority (UPDATED with probe results)
 
-| Priority | Heresy | Expected Win | Risk | Effort |
-|----------|--------|-------------|------|--------|
-| **1** | Q (RSB spill) | 5-15% | Medium | Medium |
-| **2** | V (L1D footprint) | 3-7% | Low | Low |
-| **3** | S (Store queue) | 3-8% | Medium | Low |
-| **4** | T (Quad-load alignment) | 5-10% | Low | Low |
-| **5** | R (L0 BTB clustering) | 2-5% | Low | Low |
-| **6** | U (Indirect predictor) | 2-5% | Medium | High |
+| Heresy | Probe Result | Verdict | Action |
+|--------|-------------|---------|--------|
+| **Q** (RSB spill) | No overflow at 48; linear ~1 tick/depth | **DISPROVEN** | Remove |
+| **S** (Store queue) | -2~32%% delta, +-inconsistent at CNTFRQ res | **INCONCLUSIVE** | Needs perf counter |
+| **V** (L1D footprint) | 1.50→1.87 ns (+17%%) beyond 96 KB | **CONFIRMED** | Low priority |
+| **T** (Quad-load) | Not probed yet | — | Write probe |
+| **R** (L0 BTB) | Not probed yet | — | Write probe |
+| **U** (Indirect pred) | Not probed yet | — | Write probe |
 
-Note: None of these have been probed in assembly yet. Each needs a
-prove_heresies-style microbenchmark before injection.
+Probe methodology: prove_heresies2.S (assembly) + C driver, CNTVCT_EL0 at 19.2 MHz.
+Device: Snapdragon X Elite (Oryon-1), connected via adb.
+
+### Probe Details
+
+**Q (RSB depth):** Chain of 60 nested call levels (stp+bl...ldp+ret per level).
+Swept depths 5→60, 2000 reps each. Measured via CNTVCT_EL0 inside the chain.
+Result: perfect linear scaling (1 tick/depth = 52 ns/depth). No jump at 48→49.
+The RSB either exceeds 48 entries on this chip, or handles overflow gracefully
+via indirect predictor fallback rather than catastrophic flush.
+
+**S (Store queue):** 16 stp pairs (128 bytes) per iter vs 16 stp + 2 ldr.
+500K iterations. CNTVCT_EL0 resolution (52 ns/tick) is too coarse —
+the expected delta (~8 ns/iter) is smaller than one counter tick.
+Reliable measurement would require PMCCNTR (hardware cycle counter)
+via perf_event_open or kernel module.
+
+**V (L1D footprint):** Pointer chase through linked lists of 4→256 KB.
+Clear transition at 96→128 KB: 1.50 ns → 1.87 ns (+17%%).
+The 96 KB L1D is large enough that typical Turnip working sets
+(PM4 state, active descriptors) likely fit within it.
+L2 access penalty is only 7 ns, making this a low-priority optimization.
