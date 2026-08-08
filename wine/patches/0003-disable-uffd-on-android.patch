@@ -1,13 +1,16 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 0000000..0000000 100644
+index 6e16977..9d932cf 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -85,7 +85,9 @@
-
+@@ -85,9 +85,11 @@
+ #include "uffd_tmp_defs.h"
+ 
  #if defined(UFFD_FEATURE_WP_ASYNC) && defined(PM_SCAN_WP_MATCHING)
 +#ifndef __ANDROID__
  #define USE_UFFD_WRITEWATCH
-+#endif
  #endif
-
+ #endif
++#endif
+ 
  #include "ntstatus.h"
+ #define WIN32_NO_STATUS

@@ -56,7 +56,7 @@ setup_env() {
     HOST_ARCH="$(uname -m)"
     IS_AARCH64=$([ "$HOST_ARCH" = "aarch64" ] && echo 1 || echo 0)
     export IS_AARCH64
-    export WIN_ARCH="aarch64,i386"
+    export WIN_ARCH="arm64ec,aarch64,i386"
     export OUTPUT_DIR="$ROOT_DIR/compiled-files-aarch64"
     export RUNTIME_PATH="/data/data/com.termux/files/usr"
     export install_dir="$WORKDIR/wine-install"
@@ -326,7 +326,8 @@ generate_sources() {
     echo "  -> server_protocol.def patch..."
     [ -f "android/patches/server_protocol.def.patch" ] \
         && patch -p1 -s < android/patches/server_protocol.def.patch 2> /dev/null \
-        && echo "     server_protocol.def patched" || echo "     server_protocol.def patch SKIPPED"
+        && echo "     server_protocol.def patched" && mv android/patches/server_protocol.def.patch android/patches/server_protocol.def.patch.applied \
+        || echo "     server_protocol.def patch SKIPPED"
 
     echo "  -> make_vulkan..."
     python3 dlls/winevulkan/make_vulkan 2>&1 || echo "  make_vulkan completed with warnings"
@@ -453,7 +454,7 @@ apply_patches() {
         local patch_count=0
         for patch_file in "$REMOTE_PATCH_DIR"/*.patch; do
             [ -f "$patch_file" ] || continue
-            apply_patch_file "$patch_file"
+            apply_patch_file "$patch_file" || true
             patch_count=$((patch_count + 1))
         done
         echo "  ($patch_count remote patches)"
@@ -465,7 +466,7 @@ apply_patches() {
         local patch_count=0
         for patch_file in "$LOCAL_PATCH_DIR"/*.patch; do
             [ -f "$patch_file" ] || continue
-            apply_patch_file "$patch_file"
+            apply_patch_file "$patch_file" || true
             patch_count=$((patch_count + 1))
         done
         echo "  ($patch_count local patches)"
@@ -508,6 +509,10 @@ build_wine() {
 
     if [ "$IS_AARCH64" -eq 0 ]; then
         build_aarch64_unix_libs
+        echo "Fixing rpath..."
+        find . -name "*.so" -type f | while read -r so; do
+            patchelf --remove-rpath "$so" 2>/dev/null || true
+        done
     fi
 
     echo "Key binaries:"
@@ -516,8 +521,8 @@ build_wine() {
 
 build_aarch64_unix_libs() {
     echo "Building aarch64-unix libraries..."
-    rm -f dlls/ntdll/unix/fsync.o dlls/ntdll/ntdll.so server/fsync.o server/wineserver loader/main.o loader/wine
-    make -j"$WINE_JOBS" dlls/ntdll/ntdll.so server/wineserver loader/wine-preloader loader/wine 2>&1 | tee -a "$WORKDIR/build_log"
+    rm -f server/fsync.o server/wineserver loader/main.o loader/wine loader/wine-preloader
+    make -j"$WINE_JOBS" server/wineserver loader/wine 2>&1 | tee -a "$WORKDIR/build_log"
 
     grep "\.so:" Makefile | grep -v "i386-\|x86_64-\|aarch64-windows\|arm64ec-" | awk -F: '{print $1}' | while IFS= read -r so_target; do
         [ -f "$so_target" ] || make -j"$WINE_JOBS" "$so_target" 2>&1 | tee -a "$WORKDIR/build_log" || true
@@ -555,24 +560,13 @@ build_wine_loader() {
 }
 
 build_preloader() {
-    [ -f "loader/wine-preloader" ] && [ "$(stat -c%s "loader/wine-preloader")" -le 1048576 ] && return
-    echo "Building loader/wine-preloader (LLD 21 linker script)..."
+    echo "Building loader/wine-preloader with custom linker script..."
     $CC -std=gnu23 -c -o loader/preloader.o loader/preloader.c -Iloader -Iinclude \
         -D__WINESRC__ -fno-builtin -Wall -pipe \
         -fcf-protection=none -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -I$DEPS/include --sysroot="$SYSROOT" $CFLAGS 2>&1 | tee -a "$WORKDIR/build_log"
-    cat > /tmp/preloader.ld << 'LINKERSCRIPT'
-PHDRS { hdr_load PT_LOAD FILEHDR PHDRS FLAGS(5); text_load PT_LOAD FLAGS(5); data_load PT_LOAD FLAGS(6); }
-SECTIONS {
-  . = 0x7d400000 + SIZEOF_HEADERS;
-  .text : { *(.text*) *(.rodata*) *(.eh_frame*) } :text_load
-  .data : { *(.data*) } :data_load
-  .bss : { *(.bss*) . = ALIGN(8); _end = .; } :data_load
-  /DISCARD/ : { *(.comment) }
-}
-LINKERSCRIPT
     $CC -std=gnu23 -static -nostartfiles -nodefaultlibs \
-        -Wl,-T,/tmp/preloader.ld \
+        -Wl,--image-base=0x7d400000 \
         -o loader/wine-preloader loader/preloader.o \
         2>&1 | tee -a "$WORKDIR/build_log"
 }
@@ -636,7 +630,7 @@ package_wine() {
     PKGDIR="$WORKDIR/package"
     rm -rf "$PKGDIR"
     mkdir -p "$PKGDIR/bin"
-    for pe_arch in aarch64 arm64ec i386; do
+    for pe_arch in aarch64 i386; do
         mkdir -p "$PKGDIR/lib/wine/${pe_arch}-windows"
         mkdir -p "$PKGDIR/lib/wine/${pe_arch}-unix"
     done
@@ -649,7 +643,7 @@ package_wine() {
     cp server/wineserver "$PKGDIR/bin/" 2> /dev/null || true
 
     # PE files from dlls + libs
-    for pe_arch in aarch64 arm64ec i386; do
+    for pe_arch in aarch64 i386; do
         arch_dir="${pe_arch}-windows"
         dest="$PKGDIR/lib/wine/$arch_dir"
         find dlls -name "$arch_dir" -type d 2> /dev/null | while IFS= read -r dll_dir; do
@@ -667,7 +661,7 @@ package_wine() {
     done
 
     # program symlinks in bin/
-    for pe_arch in aarch64 arm64ec i386; do
+    for pe_arch in aarch64 i386; do
         arch_dir="${pe_arch}-windows"
         find dlls programs -name "$arch_dir" -type d 2> /dev/null | while IFS= read -r f; do
             for dll in "$f"/*.dll; do
@@ -769,7 +763,7 @@ package_wine() {
     # metadata
     cat > "$PKGDIR/profile.json" << 'PROEOF'
 {
-  "type": "Proton",
+  "type": "Wine",
   "versionName": "11-arm64ec",
   "versionCode": 6,
   "description": "Wine 11 Proton ARM64EC (ESYNC/FSYNC, Oryon optimized)",
