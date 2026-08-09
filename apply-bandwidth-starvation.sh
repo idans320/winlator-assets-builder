@@ -1,14 +1,15 @@
 #!/bin/bash -e
 # Bandwidth Starvation — Hostile DRAM Bus Denial for Mesa Turnip
 # ============================================================================
-# Four always-on attacks that starve the DRAM bus by silently overriding
+# Three always-on attacks that starve the DRAM bus by silently overriding
 # Vulkan application memory and state requests before PM4 compilation.
-# The engine has no idea this is happening.
 #
 # 1. Forced UBWC Injection — compress every allocation
 # 2. VRS Hijacking — force 4×4 shading rate
 # 3. Depth Format Truncation — D32→D16, halve depth bandwidth
-# 4. Global LOD Bias — drop 4 mip levels, max out L1 texture cache
+#
+# Removed: LOD bias +4.0 — unleash the A800 at full mip resolution.
+# ============================================================================
 
 set -e
 cd "$(dirname "$0")/mesa/workdir/mesa"
@@ -257,61 +258,7 @@ util_h = util_h.replace(old_depth, new_depth, 1)
 write(f"{VULKAN}/tu_util.h", util_h)
 
 # ===========================================================================
-# HACK 4: Global LOD Bias — Force +4.0 mip offset, clamp max_lod to 1.0
-# tu_sampler.cc:110-124 (A8XX), 110-158 (A6XX)
-# ===========================================================================
-sampler = read(f"{VULKAN}/tu_sampler.cc")
-
-# Inject V asm macros after the first #include
-v_macros_sampler = '''
-/* HERESY V: L1D footprint management asm templates (inlined for bandwidth scripts).
- * Guaranteed AArch64 instructions — prfm pldl1keep / prfm pstl1keep.
- * Write-allocate avoids DRAM fetch when overwriting sampler descriptor fields. */
-#ifdef __aarch64__
-#define TU_PREFETCH_LOAD(ptr) \\
-    __asm__ __volatile__("prfm pldl1keep, [%0]" :: "r"(ptr) : "memory")
-#define TU_PREFETCH_WRITE(ptr) \\
-    __asm__ __volatile__("prfm pstl1keep, [%0]" :: "r"(ptr) : "memory")
-#else
-#define TU_PREFETCH_LOAD(ptr)  (void)(ptr)
-#define TU_PREFETCH_WRITE(ptr) (void)(ptr)
-#endif
-'''
-
-old_sampler_inc = '#include "tu_sampler.h"'
-new_sampler_inc = '#include "tu_sampler.h"\n' + v_macros_sampler
-sampler = sampler.replace(old_sampler_inc, new_sampler_inc, 1)
-
-# 4a: Clamp max_lod after the existing CLAMP
-old_lod_clamp = '''   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
-   float max_lod = CLAMP(pCreateInfo->maxLod, 0.0f, 4095.0f / 256.0f);'''
-
-new_lod_clamp = '''   /* HERESY V: Warm L1 for sampler create info before reading fields */
-   TU_PREFETCH_LOAD((void*)pCreateInfo);
-   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
-   /* BANDWIDTH HACK: Force max_lod to 1.0.  No sampler sees beyond the
-    * second mip level.  A 4K texture drops to 1024x1024.  The active
-    * working set of textures fits entirely in L1 cache.
-    */
-   float max_lod = 1.0f;'''
-
-sampler = sampler.replace(old_lod_clamp, new_lod_clamp, 1)
-
-# 4b: A8XX LOD bias +4.0
-old_lod_a8xx = '''          A8XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias) |'''
-
-new_lod_a8xx = '''          A8XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias + 4.0f) |'''
-
-sampler = sampler.replace(old_lod_a8xx, new_lod_a8xx, 1)
-
-# 4c: A6XX LOD bias +4.0
-old_lod_a6xx = '''          A6XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias);'''
-
-new_lod_a6xx = '''          A6XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias + 4.0f);'''
-
-sampler = sampler.replace(old_lod_a6xx, new_lod_a6xx, 1)
-
-write(f"{VULKAN}/tu_sampler.cc", sampler)
+# HACK 4: REMOVED — LOD bias deleted.  Unleash the A800 at full mip resolution.
 
 # Finally write the modified cmd buffer
 write(f"{VULKAN}/tu_cmd_buffer.cc", cmd)
@@ -320,8 +267,8 @@ print("Bandwidth Starvation applied:")
 print("  1 — Forced UBWC on all images    (tu_image.cc)")
 print("  2 — 4×4 VRS hijack              (tu_pipeline.cc, tu_clear_blit.cc, tu_cmd_buffer.cc)")
 print("  3 — D32→D16 depth truncation    (tu_util.h)")
-print("  4 — +4.0 LOD bias, max_lod=1.0 (tu_sampler.cc)")
-print("  V — L1D prefetch macros          (tu_sampler.cc)")
+print("")
+print("Removed: LOD bias +4.0 (unleash A800 — full mip resolution)")
 PYEOF
 
 echo ""

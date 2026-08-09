@@ -1,5 +1,5 @@
 #!/bin/bash -e
-# Full Arsenal — SIMD Heresies + Bandwidth Lite
+# Full Arsenal — SIMD Heresies + Bandwidth Lite (VRS only)
 # ============================================================================
 # Runs both injection scripts against a clean Mesa Turnip clone.
 # Build with:  devbox run -- bash ./mesa/build.sh
@@ -11,7 +11,8 @@
 #
 # Removed (lose in isolation): C (+28%), N (+290%), K (+12%)
 #
-# GPU bandwidth attacks (VRS 4x4 + LOD bias +4.0) are unconditional.
+# VRS 4x4 hijack is unconditional (16× fragment work reduction).
+# LOD bias removed — unleash A800 at full mip resolution.
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
