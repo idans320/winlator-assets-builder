@@ -97,10 +97,32 @@ cmd = cmd.replace(old_vrs_lut, new_vrs_lut, 1)
 # ===========================================================================
 sampler = read(f"{VULKAN}/tu_sampler.cc")
 
+# Inject V asm macros after the first #include
+v_macros_sampler = '''
+/* HERESY V: L1D footprint management asm templates (inlined for bandwidth scripts).
+ * Guaranteed AArch64 instructions — prfm pldl1keep / prfm pstl1keep.
+ * Write-allocate avoids DRAM fetch when overwriting sampler descriptor fields. */
+#ifdef __aarch64__
+#define TU_PREFETCH_LOAD(ptr) \\
+    __asm__ __volatile__("prfm pldl1keep, [%0]" :: "r"(ptr) : "memory")
+#define TU_PREFETCH_WRITE(ptr) \\
+    __asm__ __volatile__("prfm pstl1keep, [%0]" :: "r"(ptr) : "memory")
+#else
+#define TU_PREFETCH_LOAD(ptr)  (void)(ptr)
+#define TU_PREFETCH_WRITE(ptr) (void)(ptr)
+#endif
+'''
+
+old_sampler_inc = '#include "tu_sampler.h"'
+new_sampler_inc = '#include "tu_sampler.h"\n' + v_macros_sampler
+sampler = sampler.replace(old_sampler_inc, new_sampler_inc, 1)
+
 old_lod_clamp = '''   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
    float max_lod = CLAMP(pCreateInfo->maxLod, 0.0f, 4095.0f / 256.0f);'''
 
-new_lod_clamp = '''   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
+new_lod_clamp = '''   /* HERESY V: Warm L1 for sampler create info before reading fields */
+   TU_PREFETCH_LOAD((void*)pCreateInfo);
+   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
    /* BANDWIDTH LITE: Clamp max_lod to 1.0 — drop to mip 1.  L1 texture
     * cache hit rate maxed out.  4K → 1024×1024 effective resolution.
     */
@@ -126,6 +148,7 @@ write(f"{VULKAN}/tu_cmd_buffer.cc", cmd)
 print("Bandwidth Lite applied:")
 print("  1 — 4×4 VRS hijack              (tu_pipeline.cc, tu_clear_blit.cc, tu_cmd_buffer.cc)")
 print("  2 — +4.0 LOD bias, max_lod=1.0 (tu_sampler.cc)")
+print("  V — L1D prefetch macros          (tu_sampler.cc)")
 print("")
 print("NOT applied (crashed): UBWC force, D32→D16 depth truncation")
 PYEOF
