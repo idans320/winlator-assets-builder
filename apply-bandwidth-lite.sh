@@ -115,8 +115,8 @@ tu_emit_vrs_force_4x4(struct tu_cs *cs, uint16_t gras_reg, uint32_t gras_val)
 }
 '''
 
-cs_h = cs_h.replace('tu_cs_emit_write_reg(struct tu_cs *cs, uint16_t reg, uint32_t value)',
-                     'tu_cs_emit_write_reg(struct tu_cs *cs, uint16_t reg, uint32_t value)\n' + w_helper, 1)
+cs_h = cs_h.replace('   tu_cs_emit(cs, value);\n}\n\n/**',
+                     '   tu_cs_emit(cs, value);\n}\n\n' + w_helper + '\n/**', 1)
 write(f"{VULKAN}/tu_cs.h", cs_h)
 
 # Replace pipeline VRS (disabled path) — full REPLACE mode

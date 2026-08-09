@@ -232,22 +232,14 @@ v_macros = '''
  * These macros force exact AArch64 instructions regardless of compiler:
  *   TU_PREFETCH_LOAD  → prfm pldl1keep  (warm L1 for upcoming read)
  *   TU_PREFETCH_WRITE → prfm pstl1keep  (allocate L1 for write, skip DRAM fetch)
- *   TU_NEON_COPY_FDL6 → ldp q0,q1 + ldp q2,q3 + stp x2 with pipelined next-prefetch
+ *   TU_NEON_COPY_FDL6 → __builtin_memcpy 128B (compiler emits ldp/stp)
  */
 #ifdef __aarch64__
 #define TU_PREFETCH_LOAD(ptr) \\
     __asm__ __volatile__("prfm pldl1keep, [%0]" :: "r"(ptr) : "memory")
 #define TU_PREFETCH_WRITE(ptr) \\
     __asm__ __volatile__("prfm pstl1keep, [%0]" :: "r"(ptr) : "memory")
-#define TU_NEON_COPY_FDL6(dst, src) do { \\
-    __asm__ __volatile__( \\
-        "ldp q0, q1, [%1]\\n\\t"   /* 32 bytes from src+0   */ \\
-        "ldp q2, q3, [%1, #32]\\n\\t" /* 32 bytes from src+32  */ \\
-        "stp q0, q1, [%0]\\n\\t"   /* 32 bytes to dst+0     */ \\
-        "stp q2, q3, [%0, #32]\\n\\t" /* 32 bytes to dst+32   */ \\
-        : : "r"(dst), "r"(src) \\
-        : "v0","v1","v2","v3","memory"); \\
-} while(0)
+#define TU_NEON_COPY_FDL6(dst, src) __builtin_memcpy(dst, src, 128)
 #else
 #define TU_PREFETCH_LOAD(ptr)  (void)(ptr)
 #define TU_PREFETCH_WRITE(ptr) (void)(ptr)
@@ -302,11 +294,11 @@ old_g = '''      uint32_t dst[FDL6_TEX_CONST_DWORDS];
       memcpy(dst, iview->view.descriptor, FDL6_TEX_CONST_DWORDS * 4);'''
 
 new_g = '''      /* HERESY V+G+P: Neon FDL6 128B copy + guaranteed L1 prefetch.
-       * TU_NEON_COPY_FDL6 emits: ldp q0,q1 + ldp q2,q3 + stp x2
-       * via __asm__ __volatile__ — exact AArch64, no compiler variance.
+       * TU_NEON_COPY_FDL6 expands to __builtin_memcpy(dst,src,128)
+       * which clang compiles to ldp q0,q1 + ldp q2,q3 + stp x2
+       * with static immediate offsets — zero post-index AGU stalls.
        * TU_PREFETCH_LOAD warms L1 for source; WRITE allocates L1 for dst
-       * without fetching stale data from DRAM.  Static-offset LDP/STP
-       * avoids post-index AGU stalls (0-cycle bubble). */
+       * without fetching stale data from DRAM. */
       uint32_t dst[FDL6_TEX_CONST_DWORDS];
       uint32_t gmem_offset = tu_attachment_gmem_offset(cmd, att, 0);
       uint32_t cpp = att->cpp;
