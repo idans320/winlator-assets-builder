@@ -1,0 +1,48 @@
+From 70278a17bb43318a0d2f318f479706ff5103820d Mon Sep 17 00:00:00 2001
+From: builder <builder@winlator>
+Date: Wed, 11 Nov 2026 21:10:45 +0200
+Subject: [PATCH] tu: reserve an indirect-buffer chain once and prefetch its
+ entries
+
+tu_cs_emit_call walks a growable command stream and lets each
+CP_INDIRECT_BUFFER packet reserve its own space, so a long chain can
+grow the stream part-way through.  Reserve entry_count * 4 dwords first
+and prefetch the entry array; the packets are still emitted one at a
+time because each entry has to be bounds-checked.
+---
+ src/freedreno/vulkan/tu_cs.h | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+index f4d58c7..b41a489 100644
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -453,13 +453,23 @@ tu_cs_emit_state_ib(struct tu_cs *cs, struct tu_draw_state state)
+ /**
+  * Emit a CP_INDIRECT_BUFFER command packet for each entry in the target
+  * command stream.
++ *
++ * The whole chain is reserved up front so the per-packet bounds checks in
++ * tu_cs_emit_pkt7 never have to grow the command stream in the middle of
++ * it, and the entry array is prefetched before the walk.
+  */
+ static inline void
+ tu_cs_emit_call(struct tu_cs *cs, const struct tu_cs *target)
+ {
+    assert(target->mode == TU_CS_MODE_GROW);
+-   for (uint32_t i = 0; i < target->entry_count; i++)
+-      tu_cs_emit_ib(cs, target->entries + i);
++   if (target->entry_count == 0)
++      return;
++   tu_cs_reserve(cs, target->entry_count * 4);
++   TU_PREFETCH_LOAD((void*)target->entries);
++   for (uint32_t i = 0; i < target->entry_count; i++) {
++      const struct tu_cs_entry *e = target->entries + i;
++      tu_cs_emit_ib(cs, e);
++   }
+ }
+ 
+ /**
+-- 
+2.55.0
+
