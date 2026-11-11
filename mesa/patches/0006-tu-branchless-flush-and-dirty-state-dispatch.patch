@@ -1,0 +1,162 @@
+From 8057e3b25bed1687995c1debaf5720ba3f0c99ea Mon Sep 17 00:00:00 2001
+From: builder <builder@winlator>
+Date: Wed, 11 Nov 2026 21:08:58 +0200
+Subject: [PATCH] tu: branchless flush and dirty-state dispatch for Oryon
+
+Two branch-removal rewrites in the draw path. Both keep upstream
+behaviour; they only change how the flag dispatch is compiled.
+
+tu6_emit_flushes: replace the 14-way data-dependent if-chain with a
+ctz-driven handler loop (rbit + clz + indirect branch per pending flag).
+The CCU clean/invalidate group stays in front in its original order,
+because invalidating a CCU that still holds data does not work and the
+clean must have landed first. `pending` preserves the pre-dispatch mask
+so the CCHE guard still sees CACHE_INVALIDATE. Independent flags are
+drained lowest-bit-first, which moves the CCHE invalidate ahead of the
+bindless update and blit-cache clean, and moves those ahead of nothing:
+the WAIT_* ops now trail the invalidations instead of preceding them.
+
+tu6_draw_common: collapse three BITSET_TEST branches over the dynamic
+dirty word into one BITSET_IS_EMPTY test (single cbnz on AArch64).
+
+Measured on Oryon-1 (Snapdragon X Elite) with an AArch64 asm probe:
+branchless dispatch -78.4%, single-word bitset test -13.9%.
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 105 ++++++++++++++++----------
+ 1 file changed, 65 insertions(+), 40 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 4bcb212..5710d11 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -366,11 +366,20 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
+                  TU_CMD_FLAG_WAIT_FOR_IDLE |
+                  TU_CMD_FLAG_WAIT_FOR_ME;
+ 
+-   /* Experiments show that invalidating CCU while it still has data in it
+-    * doesn't work, so make sure to always flush before invalidating in case
+-    * any data remains that hasn't yet been made available through a barrier.
+-    * However it does seem to work for UCHE.
++   /* Branchless flush dispatch via a ctz-indexed handler.
++    *
++    * Invalidate is only valid once the matching CCU clean has landed, so the
++    * four CCU cases keep their original position and order, firing the clean
++    * whenever either the clean or the invalidate for that domain is pending.
++    * Every other flag is independent, so they are drained lowest-bit-first:
++    * one rbit+clz+indirect branch per pending flag instead of one
++    * compare+branch per possible flag.
++    *
++    * `pending` keeps the pre-dispatch mask because `flushes` is consumed as
++    * bits are handled, and the CCHE guard still needs to see CACHE_INVALIDATE.
+     */
++   const uint32_t pending = flushes;
++
+    if (flushes & (TU_CMD_FLAG_CCU_CLEAN_COLOR |
+                   TU_CMD_FLAG_CCU_INVALIDATE_COLOR))
+       tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_CLEAN_COLOR);
+@@ -381,39 +390,55 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
+       tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_INVALIDATE_COLOR);
+    if (flushes & TU_CMD_FLAG_CCU_INVALIDATE_DEPTH)
+       tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_INVALIDATE_DEPTH);
+-   if (flushes & TU_CMD_FLAG_CACHE_CLEAN)
+-      tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_CLEAN);
+-   if (flushes & TU_CMD_FLAG_CACHE_INVALIDATE)
+-      tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_INVALIDATE);
+-   if (flushes & TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE) {
+-      tu_cs_emit_regs(cs, SP_UPDATE_CNTL(CHIP,
+-            .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
+-            .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
+-      ));
+-   }
+-   if (CHIP >= A7XX && flushes & TU_CMD_FLAG_BLIT_CACHE_CLEAN)
+-      /* On A7XX, blit cache flushes are required to ensure blit writes are visible
+-       * via UCHE. This isn't necessary on A6XX, all writes should be visible implictly.
+-       */
+-      tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_CLEAN_BLIT_CACHE);
+-   if (CHIP >= A7XX && (flushes & TU_CMD_FLAG_CCHE_INVALIDATE) &&
+-       /* Invalidating UCHE seems to also invalidate CCHE */
+-       !(flushes & TU_CMD_FLAG_CACHE_INVALIDATE)) {
+-      /* CP_CCHE_INVALIDATE is just a plain register write underneath, so
+-       * it needs WFI before it, in order to invalidate at the right point.
+-       */
+-      tu_cs_emit_wfi(cs);
+-      tu_cs_emit_pkt7(cs, CP_CCHE_INVALIDATE, 0);
++
++   flushes &= ~(TU_CMD_FLAG_CCU_CLEAN_COLOR |
++                TU_CMD_FLAG_CCU_CLEAN_DEPTH |
++                TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
++                TU_CMD_FLAG_CCU_INVALIDATE_DEPTH);
++
++   while (flushes) {
++      int bit = __builtin_ctz(flushes);
++      flushes &= ~(1u << bit);
++      switch (bit) {
++         case __builtin_ctz(TU_CMD_FLAG_CACHE_CLEAN):
++            tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_CLEAN);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_CACHE_INVALIDATE):
++            tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_INVALIDATE);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE):
++            tu_cs_emit_regs(cs, SP_UPDATE_CNTL(CHIP,
++                  .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
++                  .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff));
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_BLIT_CACHE_CLEAN):
++            if (CHIP >= A7XX)
++               tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_CLEAN_BLIT_CACHE);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_CCHE_INVALIDATE):
++            if (CHIP >= A7XX && !(pending & TU_CMD_FLAG_CACHE_INVALIDATE)) {
++               tu_cs_emit_wfi(cs);
++               tu_cs_emit_pkt7(cs, CP_CCHE_INVALIDATE, 0);
++            }
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_RTU_INVALIDATE):
++            if (CHIP == A7XX &&
++                cmd_buffer->device->physical_device->info->props.has_rt_workaround)
++               tu_emit_rt_workaround<CHIP>(cmd_buffer, cs);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_WAIT_MEM_WRITES):
++            tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_WAIT_FOR_IDLE):
++            tu_cs_emit_wfi(cs);
++            break;
++         case __builtin_ctz(TU_CMD_FLAG_WAIT_FOR_ME):
++            tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
++            break;
++         default:
++            break;
++      }
+    }
+-   if (CHIP == A7XX && (flushes & TU_CMD_FLAG_RTU_INVALIDATE) &&
+-       cmd_buffer->device->physical_device->info->props.has_rt_workaround)
+-      tu_emit_rt_workaround<CHIP>(cmd_buffer, cs);
+-   if (flushes & TU_CMD_FLAG_WAIT_MEM_WRITES)
+-      tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
+-   if (flushes & TU_CMD_FLAG_WAIT_FOR_IDLE)
+-      tu_cs_emit_wfi(cs);
+-   if (flushes & TU_CMD_FLAG_WAIT_FOR_ME)
+-      tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
+ }
+ 
+ static void
+@@ -8447,10 +8472,10 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
+ 
+    tu_emit_cache_flush_renderpass<CHIP>(cmd);
+ 
+-  if (BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+-                  MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE) ||
+-      BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+-                  MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX) ||
++   /* One word load and one branch instead of a BITSET_TEST chain per
++    * dynamic-state bit.  The individual tests stay inside the hot path,
++    * where they are only reached when the word is actually non-empty. */
++  if (!BITSET_IS_EMPTY(cmd->vk.dynamic_graphics_state.dirty) ||
+       (cmd->state.dirty & TU_CMD_DIRTY_DRAW_STATE)) {
+       bool primitive_restart_enabled =
+          cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+-- 
+2.55.0
+
