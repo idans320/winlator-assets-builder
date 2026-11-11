@@ -1,0 +1,192 @@
+From fd3f2e59340a88952d6e3ba08d6b93bc2e0ad546 Mon Sep 17 00:00:00 2001
+From: builder <builder@winlator>
+Date: Wed, 11 Nov 2026 21:09:23 +0200
+Subject: [PATCH] tu: inline descriptor and push-constant copies, prefetch L1
+ on AArch64
+
+Descriptor and push-constant updates go through libc memcpy today, which
+on AArch64 costs a PLT call, a register save/restore preamble and a
+runtime size check before any data moves.
+
+- FDL6 input-attachment descriptors are a fixed 64 bytes; copy them with
+  sizeof(dst) so the compiler lowers the copy to ldp/stp q-register
+  pairs and the size cannot drift from the destination array.
+- Push constants use a bounded word loop over the <=128-byte block.
+- Dynamic UBO bindings with a 4+ element array patch four descriptors
+  per iteration (four loads, four adds, four stores, no cross-iteration
+  dependency).  The batched path breaks rather than continues, so the
+  for-increment cannot leave dyn_idx one offset ahead for the next
+  binding.
+- TU_PREFETCH_LOAD/WRITE emit prfm pldl1keep/pstl1keep directly, since
+  __builtin_prefetch is only a hint, ahead of the descriptor walk, the
+  input-attachment copy and the descriptor memset.
+
+Provenance: research-tu8-hacks, asm probe on Oryon-1: 4-wide UBO
+patching -13.7%; L1D pointer chase shows the 96 KB cliff at +17% latency.
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc     | 67 ++++++++++++++++++++---
+ src/freedreno/vulkan/tu_cs.h              | 16 ++++++
+ src/freedreno/vulkan/tu_descriptor_set.cc |  5 ++
+ 3 files changed, 80 insertions(+), 8 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 5710d11..607c3a8 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -2837,6 +2837,8 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
+       return (struct tu_draw_state) {};
+    }
+ 
++   /* Warm L1 for the attachment pointer array before walking it. */
++   TU_PREFETCH_LOAD((void*)cmd->state.attachments);
+    for (unsigned i = 0; i < subpass->input_count * 2; i++) {
+       uint32_t a = subpass->input_attachments[i / 2].attachment;
+       if (a == VK_ATTACHMENT_UNUSED)
+@@ -2845,11 +2847,16 @@ tu_emit_input_attachments(struct tu_cmd_buffer *cmd,
+       const struct tu_image_view *iview = cmd->state.attachments[a];
+       const struct tu_render_pass_attachment *att =
+          &cmd->state.pass->attachments[a];
++      /* Fixed-size FDL6 copy: __builtin_memcpy with a compile-time size
++       * compiles to ldp q/stp q pairs at static immediate offsets.  The
++       * write prefetch allocates the line without fetching its contents. */
+       uint32_t dst[FDL6_TEX_CONST_DWORDS];
+       uint32_t gmem_offset = tu_attachment_gmem_offset(cmd, att, 0);
+       uint32_t cpp = att->cpp;
+ 
+-      memcpy(dst, iview->view.descriptor, FDL6_TEX_CONST_DWORDS * 4);
++      TU_PREFETCH_LOAD((void*)iview->view.descriptor);
++      TU_PREFETCH_WRITE(dst);
++      __builtin_memcpy(dst, iview->view.descriptor, sizeof(dst));
+ 
+       /* Cube descriptors require a different sampling instruction in shader,
+        * however we don't know whether image is a cube or not until the start
+@@ -4808,6 +4815,8 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
+       uint32_t *src = set->dynamic_descriptors;
+       uint32_t *dst = descriptors_state->dynamic_descriptors +
+          dynamic_offset_offset / 4;
++      /* Warm L1 for the binding layout before the data-dependent walk. */
++      TU_PREFETCH_LOAD((void*)&set->layout->binding[0]);
+       for (unsigned j = 0; j < set->layout->binding_count; j++) {
+          struct tu_descriptor_set_binding_layout *binding =
+             &set->layout->binding[j];
+@@ -4815,16 +4824,51 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
+             for (unsigned k = 0; k < binding->array_size; k++, dyn_idx++) {
+                assert(dyn_idx < info->dynamicOffsetCount);
+                uint32_t offset = info->pDynamicOffsets[dyn_idx];
++               /* Four dynamic UBO descriptors at a time: four loads, four
++                * adds, four stores with no cross-iteration dependency, so
++                * the decoder can dispatch them in parallel.  Non-UBO and
++                * short arrays fall through to the scalar path below. */
++               if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC &&
++                   binding->size == 8 && binding->array_size >= 4 && k == 0) {
++                  while (k + 3 < binding->array_size) {
++                     uint32_t o0 = info->pDynamicOffsets[dyn_idx];
++                     uint32_t o1 = info->pDynamicOffsets[dyn_idx + 1];
++                     uint32_t o2 = info->pDynamicOffsets[dyn_idx + 2];
++                     uint32_t o3 = info->pDynamicOffsets[dyn_idx + 3];
++                     uint64_t va0 = src[0] | ((uint64_t)src[1] << 32);
++                     uint64_t va1 = src[2] | ((uint64_t)src[3] << 32);
++                     uint64_t va2 = src[4] | ((uint64_t)src[5] << 32);
++                     uint64_t va3 = src[6] | ((uint64_t)src[7] << 32);
++                     va0 += o0; va1 += o1; va2 += o2; va3 += o3;
++                     dst[0] = (uint32_t)va0; dst[1] = (uint32_t)(va0 >> 32);
++                     dst[2] = (uint32_t)va1; dst[3] = (uint32_t)(va1 >> 32);
++                     dst[4] = (uint32_t)va2; dst[5] = (uint32_t)(va2 >> 32);
++                     dst[6] = (uint32_t)va3; dst[7] = (uint32_t)(va3 >> 32);
++                     k += 4; dyn_idx += 4; src += 8; dst += 8;
++                  }
++                  while (k < binding->array_size) {
++                     uint32_t off = info->pDynamicOffsets[dyn_idx];
++                     uint64_t v = src[0] | ((uint64_t)src[1] << 32);
++                     v += off;
++                     dst[0] = (uint32_t)v; dst[1] = (uint32_t)(v >> 32);
++                     k++; dyn_idx++; src += 2; dst += 2;
++                  }
++                  /* k == array_size: break, not continue — the for-increment
++                   * would advance dyn_idx past the offsets this block already
++                   * consumed and desync every following dynamic binding. */
++                  break;
++               }
++
++               /* Warm the source line and allocate the destination line. */
++               TU_PREFETCH_LOAD((void*)src);
++               TU_PREFETCH_WRITE(dst);
+                memcpy(dst, src, binding->size);
+ 
+                if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+-                  /* Note: we can assume here that the addition won't roll
+-                   * over and change the SIZE field.
+-                   */
+                   uint64_t va = src[0] | ((uint64_t)src[1] << 32);
+                   va += offset;
+-                  dst[0] = va;
+-                  dst[1] = va >> 32;
++                  dst[0] = (uint32_t)va;
++                  dst[1] = (uint32_t)(va >> 32);
+                } else {
+                   uint32_t *dst_desc = dst;
+                   for (unsigned i = 0;
+@@ -5336,8 +5380,15 @@ tu_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
+                         const VkPushConstantsInfoKHR *pPushConstantsInfo)
+ {
+    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+-   memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
+-          pPushConstantsInfo->pValues, pPushConstantsInfo->size);
++   /* Push constants are at most MAX_PUSH_CONSTANTS_SIZE (128 bytes) and the
++    * size is a multiple of 4, so a bounded word loop compiles to inline
++    * ldp/stp without the libc memcpy call and its save/restore preamble.
++    */
++   {  uint32_t n = (pPushConstantsInfo->size + 3) / 4;
++      const uint32_t *s = (const uint32_t *)pPushConstantsInfo->pValues;
++      uint32_t *d = (uint32_t *)((char *)cmd->push_constants + pPushConstantsInfo->offset);
++      for (uint32_t i = 0; i < n; i++) d[i] = s[i];
++   }
+    cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
+ }
+ 
+diff --git a/src/freedreno/vulkan/tu_cs.h b/src/freedreno/vulkan/tu_cs.h
+index 78dcf68..f4d58c7 100644
+--- a/src/freedreno/vulkan/tu_cs.h
++++ b/src/freedreno/vulkan/tu_cs.h
+@@ -12,6 +12,22 @@
+ 
+ #include "tu_knl.h"
+ 
++/* Oryon L1D hints.  __builtin_prefetch is a hint the compiler is free to
++ * drop, so these emit the instruction directly:
++ *   TU_PREFETCH_LOAD  → prfm pldl1keep  (warm L1 for an upcoming read)
++ *   TU_PREFETCH_WRITE → prfm pstl1keep  (allocate the line without fetching)
++ */
++#ifdef __aarch64__
++#define TU_PREFETCH_LOAD(ptr) \
++    __asm__ __volatile__("prfm pldl1keep, [%0]" :: "r"(ptr) : "memory")
++#define TU_PREFETCH_WRITE(ptr) \
++    __asm__ __volatile__("prfm pstl1keep, [%0]" :: "r"(ptr) : "memory")
++#else
++#define TU_PREFETCH_LOAD(ptr)  (void)(ptr)
++#define TU_PREFETCH_WRITE(ptr) (void)(ptr)
++#endif
++
++
+ /* For breadcrumbs we may open a network socket based on the envvar,
+  * it's not something that should be enabled by default.
+  */
+diff --git a/src/freedreno/vulkan/tu_descriptor_set.cc b/src/freedreno/vulkan/tu_descriptor_set.cc
+index ed9552f..56fd582 100644
+--- a/src/freedreno/vulkan/tu_descriptor_set.cc
++++ b/src/freedreno/vulkan/tu_descriptor_set.cc
+@@ -1138,6 +1138,11 @@ write_buffer_descriptor_addr(const struct tu_device *device,
+    unsigned num_descriptors = 1 +
+       COND(info->props.storage_16bit && !info->props.has_isam_v, 1) +
+       COND(info->props.storage_8bit, 1);
++   /* Allocate the destination lines in L1 before zeroing them: the memset
++    * is about to overwrite the whole descriptor anyway, so fetching the
++    * old contents from memory is wasted bandwidth. */
++   TU_PREFETCH_WRITE(dst);
++   TU_PREFETCH_WRITE((char*)dst + 64);
+    memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
+ 
+    if (!buffer_info || buffer_info->address == 0)
+-- 
+2.55.0
+
