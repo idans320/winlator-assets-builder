@@ -66,6 +66,9 @@ DXVK_VERSION_NAME="${DXVK_VERSION}-arm64ec-gplasync"
 echo -e "${green}DXVK version: $DXVK_VERSION_NAME${nocolor}"
 
 # --- Generate Meson cross-file ---
+A64_OPT="-mcpu=oryon-1 -O3 -funroll-loops"
+A64_OPT_LIST=$(printf "'%s', " $A64_OPT)
+A64_OPT_LIST="${A64_OPT_LIST%, }"
 CROSSFILE="$WORKDIR/dxvk-cross-aarch64.txt"
 cat > "$CROSSFILE" << CROSSEOF
 [binaries]
@@ -79,8 +82,8 @@ windres = '$WINDRES'
 needs_exe_wrapper = true
 
 [built-in options]
-c_args = ['-mcpu=oryon-1', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
-cpp_args = ['-mcpu=oryon-1', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
+c_args = [$A64_OPT_LIST, '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
+cpp_args = [$A64_OPT_LIST, '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
 c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
 cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
 
@@ -97,8 +100,10 @@ echo "Cross-file: $CROSSFILE"
 BUILD_DIR="$WORKDIR/build"
 INSTALL_DIR="$WORKDIR/install"
 
-if [ ! -f "$BUILD_DIR/build.ninja" ]; then
-    echo "Configuring Meson (aarch64-w64-mingw32)..."
+A64_FLAGS_STAMP="$BUILD_DIR/.dxvk_a64_opt"
+if [ ! -f "$BUILD_DIR/build.ninja" ] || [ "$(cat "$A64_FLAGS_STAMP" 2>/dev/null)" != "$A64_OPT" ]; then
+    echo "Configuring Meson (aarch64-w64-mingw32) with $A64_OPT..."
+    rm -rf "$BUILD_DIR" "$INSTALL_DIR"
     meson setup "$BUILD_DIR" "$WORKDIR/dxvk" \
         --cross-file "$CROSSFILE" \
         --buildtype release \
@@ -108,6 +113,7 @@ if [ ! -f "$BUILD_DIR/build.ninja" ]; then
         --libdir "x64" \
         -Db_ndebug=if-release \
         &> "$WORKDIR/meson_log"
+    printf '%s' "$A64_OPT" > "$A64_FLAGS_STAMP"
 fi
 
 echo "Building..."
@@ -136,6 +142,13 @@ if [ ! -x "$I686_CC" ]; then
 fi
 
 I686_CROSSFILE="$WORKDIR/dxvk-cross-i686.txt"
+# The 32-bit DLLs run under FEX, so the right optimisation target is the
+# emulator, not the host CPU: fewer guest instructions and fewer basic blocks
+# mean less to translate and a smaller code cache.  Override to A/B on device:
+#   DXVK_I686_OPT="-O3 -funroll-loops" ./dxvk/build.sh
+I686_OPT="${DXVK_I686_OPT:--O2 -fno-unroll-loops}"
+I686_OPT_LIST=$(printf "'%s', " $I686_OPT)
+I686_OPT_LIST="${I686_OPT_LIST%, }"
 cat > "$I686_CROSSFILE" << CROSSEOF
 [binaries]
 c     = '$I686_CC'
@@ -148,8 +161,8 @@ windres = '$I686_WINDRES'
 needs_exe_wrapper = true
 
 [built-in options]
-c_args = ['-march=i686', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
-cpp_args = ['-march=i686', '-O3', '-ffast-math', '-funroll-loops', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
+c_args = ['-march=i686', $I686_OPT_LIST, '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
+cpp_args = ['-march=i686', $I686_OPT_LIST, '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
 c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
 cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
 
@@ -163,8 +176,10 @@ CROSSEOF
 I686_BUILD_DIR="$WORKDIR/build-i686"
 I686_INSTALL_DIR="$WORKDIR/install-i686"
 
-if [ ! -f "$I686_BUILD_DIR/build.ninja" ]; then
-    echo "Configuring Meson (i686-w64-mingw32)..."
+I686_FLAGS_STAMP="$I686_BUILD_DIR/.dxvk_i686_opt"
+if [ ! -f "$I686_BUILD_DIR/build.ninja" ] || [ "$(cat "$I686_FLAGS_STAMP" 2>/dev/null)" != "$I686_OPT" ]; then
+    echo "Configuring Meson (i686-w64-mingw32) with $I686_OPT..."
+    rm -rf "$I686_BUILD_DIR" "$I686_INSTALL_DIR"
     meson setup "$I686_BUILD_DIR" "$WORKDIR/dxvk" \
         --cross-file "$I686_CROSSFILE" \
         --buildtype release \
@@ -174,6 +189,7 @@ if [ ! -f "$I686_BUILD_DIR/build.ninja" ]; then
         --libdir "x32" \
         -Db_ndebug=if-release \
         &> "$WORKDIR/meson_log_i686"
+    printf '%s' "$I686_OPT" > "$I686_FLAGS_STAMP"
 fi
 
 echo "Building i686..."
