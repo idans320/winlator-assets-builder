@@ -62,13 +62,19 @@ echo -e "${green}FEX version: $FEX_VERSION${nocolor}"
 FEX_LOCAL_PATCHES=$(yq ".${PKG_NAME}.localPatches // \"\"" "$ROOT_DIR/packages.yml")
 if [ -n "$FEX_LOCAL_PATCHES" ] && [ "$FEX_LOCAL_PATCHES" != "null" ]; then
     echo "Applying FEXCore patches from $FEX_LOCAL_PATCHES..."
-    find "$ROOT_DIR/$FEX_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort | while read -r patch; do
+    while read -r patch; do
         echo "  Applying $(basename "$patch")..."
-        git -C "$WORKDIR/fex" am "$patch" 2>&1 || {
-            echo -e "${red}  Patch $(basename "$patch") FAILED — check $WORKDIR/fex git status${nocolor}"
-            exit 1
-        }
-    done
+        git -C "$WORKDIR/fex" am --abort 2> /dev/null || true
+        if git -C "$WORKDIR/fex" am "$patch" > /dev/null 2>&1; then
+            continue
+        fi
+        if git -C "$WORKDIR/fex" apply --reverse --check "$patch" 2> /dev/null; then
+            echo "    already applied"
+            continue
+        fi
+        echo -e "${red}  Patch $(basename "$patch") FAILED — check $WORKDIR/fex git status${nocolor}"
+        exit 1
+    done < <(find "$ROOT_DIR/$FEX_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort)
 fi
 
 # FEX's WOW64 DLL links with -nostdlib/-nodefaultlibs which omits sincos.
@@ -102,15 +108,15 @@ mkdir -p "$BUILD_DIR"
 
 ORYON_FLAGS="-mcpu=oryon-1 -O3 -ffast-math -funroll-loops -fomit-frame-pointer"
 
+# FEX WOW64 DLL links with -nostdlib which omits sincos.
+# Inject our stub object into the WOW64 target link command.
+if ! grep -q -- 'sincos_stub.o' "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.txt" 2>/dev/null; then
+    sed -i "s|target_link_options(wow64fex PRIVATE -static|target_link_options(wow64fex PRIVATE ${SINCOS_OBJ} -static|" \
+        "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.txt"
+fi
+
 if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
     echo "Configuring CMake (aarch64-w64-mingw32)..."
-
-    # FEX WOW64 DLL links with -nostdlib which omits sincos.
-    # Inject our stub object into the WOW64 target link command.
-    if ! grep -q -- 'sincos_stub.o' "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.txt" 2>/dev/null; then
-        sed -i "s|target_link_options(wow64fex PRIVATE -static|target_link_options(wow64fex PRIVATE ${SINCOS_OBJ} -static|" \
-            "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.txt"
-    fi
 
     cmake -B "$BUILD_DIR" -S "$WORKDIR/fex" -G Ninja \
         -DCMAKE_SYSTEM_NAME="Windows" \

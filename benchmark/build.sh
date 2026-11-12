@@ -87,3 +87,13 @@ echo "Termux usage:"
 echo "  adb push $OUTPUT /data/data/com.termux/files/home/"
 echo "  adb shell chmod +x /data/data/com.termux/files/home/bench-vulkan"
 echo "  adb shell /data/data/com.termux/files/home/bench-vulkan"
+
+BENCH_VERSION=$(yq ".benchmark.bench_version" "$ROOT_DIR/packages.yml")
+OUTPUT_FILE=$(yq ".benchmark.output" "$ROOT_DIR/packages.yml" | sed "s/{version}/$BENCH_VERSION/")
+PACKAGE="$ROOT_DIR/$OUTPUT_FILE"
+echo ""
+echo "Packaging..."
+rm -f "$PACKAGE"
+zip -j -q "$PACKAGE" "$OUTPUT"
+echo -e "${green}Package created: $PACKAGE${nocolor}"
+ls -lh "$PACKAGE"

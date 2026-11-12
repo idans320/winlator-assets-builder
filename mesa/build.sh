@@ -41,12 +41,18 @@ echo -e "${green}Build type: $MESA_BUILD_TYPE${nocolor}"
 
 if [ -n "$MESA_LOCAL_PATCHES" ] && [ "$MESA_LOCAL_PATCHES" != "null" ]; then
     echo "Applying local patches from $MESA_LOCAL_PATCHES ..."
-    find "$ROOT_DIR/$MESA_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort | while read -r patch; do
+    while read -r patch; do
         echo "  Applying $(basename "$patch")..."
-        git -C "$WORKDIR/mesa" am "$patch" 2>&1 || {
-            echo "  Patch $(basename "$patch") failed — check $WORKDIR/mesa git status"
-        }
-    done
+        git -C "$WORKDIR/mesa" am --abort 2> /dev/null || true
+        if git -C "$WORKDIR/mesa" am "$patch" > /dev/null 2>&1; then
+            continue
+        fi
+        if git -C "$WORKDIR/mesa" apply --reverse --check "$patch" 2> /dev/null; then
+            echo "  already applied"
+            continue
+        fi
+        echo "  Patch $(basename "$patch") failed — check $WORKDIR/mesa git status"
+    done < <(find "$ROOT_DIR/$MESA_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort)
 fi
 
 if [ ! -f "$WORKDIR/mesa/${BUILD_DIR}/build.ninja" ]; then
