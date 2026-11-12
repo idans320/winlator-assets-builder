@@ -1,4 +1,5 @@
 **/workdir/
+dist/
 result
 *.zip
 *.wcp

@@ -1,4 +1,4 @@
-.PHONY: mesa fexcore wine box64 dxvk benchmark winlator
+.PHONY: mesa fexcore wine box64 dxvk benchmark winlator assets
 
 mesa:
 	devbox run -- ./mesa/build.sh
@@ -20,3 +20,6 @@ benchmark:
 
 winlator:
 	devbox run -- ./winlator/build.sh
+
+assets:
+	./build-all-and-zip.sh
