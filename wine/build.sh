@@ -761,6 +761,14 @@ package_wine() {
     ln -sf ../lib/wine/aarch64-unix/wine "$PKGDIR/bin/wine"
     ln -sf ../lib/wine/aarch64-unix/wine-preloader "$PKGDIR/bin/wine-preloader"
 
+    # Program launchers.  Wine's install layout puts these in bin/ as symlinks
+    # to the loader; containers run bin/wineboot on first start and prefix
+    # updates, so a package without it cannot initialise.
+    for prog in winefile winecfg winepath notepad wineboot msidb regedit \
+                winedbg winemine wineconsole msiexec regsvr32; do
+        ln -sf wine "$PKGDIR/bin/$prog"
+    done
+
     # metadata
     cat > "$PKGDIR/profile.json" << 'PROEOF'
 {
