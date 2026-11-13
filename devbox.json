@@ -46,10 +46,18 @@
       "export NDK=\"$DEVBOX_DIR/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865\"",
       "echo \"Winlator Assets build environment ready\"",
       "echo \"  NDK: $NDK\"",
-      "echo \"  SDK: $ANDROID_HOME\""
+      "echo \"  SDK: $ANDROID_HOME\"",
+      "export ARM64EC_MINGW_ROOT=\"$DEVBOX_DIR/toolchain/arm64ec\"",
+      "[ -x \"$ARM64EC_MINGW_ROOT/bin/arm64ec-w64-mingw32-clang\" ] && export PATH=\"$ARM64EC_MINGW_ROOT/bin:$PATH\"",
+      "if [ -x \"$ARM64EC_MINGW_ROOT/bin/arm64ec-w64-mingw32-clang\" ]; then echo \"  ARM64EC: $ARM64EC_MINGW_ROOT\"; else echo \"  ARM64EC: not installed (devbox run setup-arm64ec)\"; fi"
     ],
     "scripts": {
-      "test": ["echo \"Error: no test specified\" && exit 1"]
+      "test": [
+        "echo \"Error: no test specified\" && exit 1"
+      ],
+      "setup-arm64ec": [
+        "./scripts/setup-arm64ec-toolchain.sh"
+      ]
     }
   }
 }

@@ -1,0 +1,21 @@
+diff --git a/src/util/util_sleep.cpp b/src/util/util_sleep.cpp
+index 86dd400..a152ef6 100644
+--- a/src/util/util_sleep.cpp
++++ b/src/util/util_sleep.cpp
+@@ -6,11 +6,14 @@
+ #include <thread>
+ 
+ // x86-specific pause macros to save energy during busy-waiting
+-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++// ARM64EC defines __x86_64__ for x64 compatibility, so exclude it explicitly.
++#if (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)) \
++    && !defined(__arm64ec__) && !defined(_M_ARM64EC)
+ #include <immintrin.h>
+ #define CPU_PAUSE() _mm_pause()
+ // ARM-specific pause macros to save energy during busy-waiting
+-#elif defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64)
++#elif defined(__arm__) || defined(__aarch64__) || defined(_M_ARM) || defined(_M_ARM64) \
++    || defined(__arm64ec__) || defined(_M_ARM64EC)
+ #define CPU_PAUSE() __asm__ volatile("isb" ::: "memory")
+ #else
+ // Nothing on other CPU architectures

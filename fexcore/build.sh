@@ -152,12 +152,49 @@ if [ "$BUILD_RC" -ne 0 ]; then
     echo -e "${red}Build failed (exit code $BUILD_RC)${nocolor}"
 fi
 
+# --- ARM64EC (x86_64 guest) build ---
+# Wine's ARM64X ntdll loads C:\windows\system32\libarm64ecfex.dll for x64
+# guests.  This is a second FEX build with the ARM64EC-capable llvm-mingw
+# (bylaws fork); upstream llvm-mingw has no ARM64EC runtime libraries.
+if [ -z "${ARM64EC_MINGW_ROOT:-}" ] || [ ! -x "$ARM64EC_MINGW_ROOT/bin/arm64ec-w64-mingw32-clang" ]; then
+    echo "ARM64EC toolchain not in environment, fetching it..."
+    "$ROOT_DIR/scripts/setup-arm64ec-toolchain.sh" > /dev/null
+    export ARM64EC_MINGW_ROOT="$ROOT_DIR/toolchain/arm64ec"
+    export PATH="$ARM64EC_MINGW_ROOT/bin:$PATH"
+fi
+
+EC_BUILD_DIR="$WORKDIR/fex/build-mingw-arm64ec"
+echo "Building ARM64EC (x86_64 guest) module..."
+cmake -B "$EC_BUILD_DIR" -S "$WORKDIR/fex" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$WORKDIR/fex/Data/CMake/toolchain_mingw.cmake" \
+    -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_LTO=False -DTUNE_CPU=none \
+    -DBUILD_TESTING=False -DBUILD_FEXCONFIG=OFF -DBUILD_THUNKS=OFF \
+    -DENABLE_ASSERTIONS=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    &> "$WORKDIR/cmake_log_arm64ec"
+# FEX's build_implib hardcodes "dlltool -m arm64"; replace the whole
+# invocation so llvm-dlltool emits ARM64EC import symbols.
+sed -i 's/arm64ec-w64-mingw32-dlltool -m arm64/llvm-dlltool -m arm64ec/g' "$EC_BUILD_DIR/build.ninja"
+if ! cmake --build "$EC_BUILD_DIR" --target arm64ecfex -j"$(nproc)" > "$WORKDIR/build_log_arm64ec" 2>&1; then
+    echo -e "${red}ARM64EC build failed — check $WORKDIR/build_log_arm64ec${nocolor}"
+    exit 1
+fi
+EC_DLL="$EC_BUILD_DIR/Bin/libarm64ecfex.dll"
+if [ ! -f "$EC_DLL" ]; then
+    echo -e "${red}ARM64EC build produced no libarm64ecfex.dll${nocolor}"
+    exit 1
+fi
+echo -e "${green}ARM64EC module: $EC_DLL${nocolor}"
+
 # --- Package ---
 echo "Packaging..."
 PKGDIR="$WORKDIR/package"
 mkdir -p "$PKGDIR/system32"
 
 find "$BUILD_DIR" -name "*.dll" -exec cp -v {} "$PKGDIR/system32/" \; 2>&1
+cp -v "$EC_DLL" "$PKGDIR/system32/"
 
 DLL_COUNT=$(find "$PKGDIR/system32" -name "*.dll" 2>/dev/null | wc -l)
 if [ "$DLL_COUNT" -eq 0 ]; then
@@ -197,7 +234,7 @@ cat > "$PKGDIR/profile.json" << PROEOF
   "type": "FEXCore",
   "versionName": "FEXCore",
   "versionCode": $FEX_COMMIT_DATE,
-  "description": "FEXCore $FEX_VERSION — Oryon optimized (llvm-mingw aarch64)",
+  "description": "FEXCore $FEX_VERSION — Oryon optimized (llvm-mingw aarch64 + ARM64EC)",
   "files": [$DLL_FILES
   ]
 }

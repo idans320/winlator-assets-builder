@@ -41,6 +41,7 @@ dxvk:
   output: "{version}-arm64ec-gplasync.wcp"
   mingw_ver: "20260519"
   preset: elitex
+  localPatches: dxvk/patches
 
 benchmark:
   description: Vulkan GPU benchmark for Turnip driver optimization tracking
@@ -53,3 +54,10 @@ winlator:
   repo: https://github.com/StevenMXZ/Winlator-Ludashi.git
   branch: ludashi-3.1
   output: winlator-{version}.apk
+
+toolchain:
+  arm64ec_mingw:
+    description: ARM64EC-capable llvm-mingw (bylaws fork, FEX's documented toolchain)
+    repo: https://github.com/bylaws/llvm-mingw
+    version: "20250920"
+    asset: llvm-mingw-{version}-ucrt-ubuntu-22.04-{host_arch}.tar.xz

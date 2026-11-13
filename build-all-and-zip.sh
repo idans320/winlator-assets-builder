@@ -58,7 +58,8 @@ mapfile -t PACKAGES < <(python3 - "$PACKAGES_FILE" <<'PY'
 import sys, yaml
 data = yaml.safe_load(open(sys.argv[1]))
 for name, cfg in data.items():
-    print(f"{name}\t{cfg.get('output', '')}")
+    if isinstance(cfg, dict) and cfg.get("output"):
+        print(f"{name}\t{cfg.get('output', '')}")
 PY
 )
 

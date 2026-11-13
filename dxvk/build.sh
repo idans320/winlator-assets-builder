@@ -61,6 +61,22 @@ if [ ! -d "$WORKDIR/dxvk" ]; then
     git clone --recurse-submodules --depth 1 --branch "$DXVK_BRANCH" "$DXVK_REPO" "$WORKDIR/dxvk" 2>&1
 fi
 
+DXVK_LOCAL_PATCHES=$(yq ".${PKG_NAME}.localPatches // \"\"" "$ROOT_DIR/packages.yml")
+if [ -n "$DXVK_LOCAL_PATCHES" ] && [ "$DXVK_LOCAL_PATCHES" != "null" ]; then
+    echo "Applying DXVK patches from $DXVK_LOCAL_PATCHES..."
+    while read -r patch; do
+        echo "  $(basename "$patch")..."
+        if git -C "$WORKDIR/dxvk" apply --check "$patch" 2> /dev/null; then
+            git -C "$WORKDIR/dxvk" apply "$patch"
+        elif git -C "$WORKDIR/dxvk" apply --reverse --check "$patch" 2> /dev/null; then
+            echo "    already applied"
+        else
+            echo -e "${red}  Patch $(basename "$patch") FAILED${nocolor}"
+            exit 1
+        fi
+    done < <(find "$ROOT_DIR/$DXVK_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f | sort)
+fi
+
 DXVK_VERSION=$(cd "$WORKDIR/dxvk" && grep -oP "version\s*:\s*'\K[^']+" meson.build | head -1)
 DXVK_VERSION_NAME="${DXVK_VERSION}-arm64ec-gplasync"
 echo -e "${green}DXVK version: $DXVK_VERSION_NAME${nocolor}"
@@ -128,6 +144,71 @@ if [ "$BUILD_RC" -ne 0 ]; then
 fi
 
 ninja -C "$BUILD_DIR" install
+
+# --- ARM64EC (x86_64 guest) build ---
+# Wine's ARM64X system32 expects ARM64EC (or ARM64X) images for x64 games.
+# Plain ARM64 is rejected by the PE loader with STATUS_INVALID_IMAGE_FORMAT.
+SYSTEM32_ARCH="${DXVK_SYSTEM32_ARCH:-arm64ec}"
+if [ "$SYSTEM32_ARCH" = "arm64ec" ]; then
+    if [ -z "${ARM64EC_MINGW_ROOT:-}" ] || [ ! -x "$ARM64EC_MINGW_ROOT/bin/arm64ec-w64-mingw32-clang" ]; then
+        echo "ARM64EC toolchain not in environment, fetching it..."
+        "$ROOT_DIR/scripts/setup-arm64ec-toolchain.sh" > /dev/null
+        export ARM64EC_MINGW_ROOT="$ROOT_DIR/toolchain/arm64ec"
+        export PATH="$ARM64EC_MINGW_ROOT/bin:$PATH"
+    fi
+
+    EC_CROSSFILE="$WORKDIR/dxvk-cross-arm64ec.txt"
+    cat > "$EC_CROSSFILE" << 'ECEOF'
+[binaries]
+c       = 'arm64ec-w64-mingw32-gcc'
+cpp     = 'arm64ec-w64-mingw32-g++'
+ar      = 'arm64ec-w64-mingw32-ar'
+ld      = 'arm64ec-w64-mingw32-ld'
+strip   = 'arm64ec-w64-mingw32-strip'
+windres = 'arm64ec-w64-mingw32-windres'
+
+[properties]
+needs_exe_wrapper = true
+
+[built-in options]
+# -fno-lto must come after DXVK's own -flto=auto: LTO bitcode does not
+# resolve the #-prefixed ARM64EC symbols from the static runtime.
+c_args = ['-O2', '-fno-lto', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
+cpp_args = ['-O2', '-fno-lto', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
+c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
+cpp_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+ECEOF
+
+    EC_BUILD_DIR="$WORKDIR/build-arm64ec"
+    EC_INSTALL_DIR="$WORKDIR/install-arm64ec"
+    if [ ! -f "$EC_BUILD_DIR/build.ninja" ]; then
+        echo "Configuring Meson (ARM64EC)..."
+        meson setup "$EC_BUILD_DIR" "$WORKDIR/dxvk" \
+            --cross-file "$EC_CROSSFILE" \
+            --buildtype release \
+            --strip \
+            --prefix "$EC_INSTALL_DIR" \
+            --bindir "x64" \
+            --libdir "x64" \
+            -Db_ndebug=if-release \
+            &> "$WORKDIR/meson_log_arm64ec"
+    fi
+    echo "Building ARM64EC..."
+    if ! ninja -C "$EC_BUILD_DIR" -j"$(nproc)" 2>&1 | tee "$WORKDIR/build_log_arm64ec"; then
+        echo -e "${red}ARM64EC build failed${nocolor}"
+        exit 1
+    fi
+    ninja -C "$EC_BUILD_DIR" install
+    SYSTEM32_DIR="$EC_INSTALL_DIR/x64"
+else
+    SYSTEM32_DIR="$INSTALL_DIR/x64"
+fi
 
 # --- i686 PE build for 32-bit games (syswow64) ---
 I686_CC="$TOOLCHAIN_BIN/i686-w64-mingw32-clang"
@@ -211,8 +292,21 @@ PKGDIR="$WORKDIR/package"
 mkdir -p "$PKGDIR/system32"
 mkdir -p "$PKGDIR/syswow64"
 
-cp -v "$INSTALL_DIR/x64/"*.dll "$PKGDIR/system32/"
+cp -v "$SYSTEM32_DIR/"*.dll "$PKGDIR/system32/"
 cp -v "$I686_INSTALL_DIR/x32/"*.dll "$PKGDIR/syswow64/"
+
+READOBJ=$(command -v llvm-readobj 2> /dev/null || echo "$TOOLCHAIN_BIN/llvm-readobj")
+if [ -x "$READOBJ" ]; then
+    SYS32_MACHINE=$("$READOBJ" --file-headers "$PKGDIR/system32/d3d11.dll" 2> /dev/null | grep -m1 "Machine:")
+    case "$SYS32_MACHINE" in
+        *ARM64EC*|*ARM64X*) ;;
+        *)
+            echo -e "${red}system32/d3d11.dll is $SYS32_MACHINE, expected ARM64EC or ARM64X${nocolor}"
+            exit 1
+            ;;
+    esac
+    echo -e "${green}system32 machine check: $SYS32_MACHINE${nocolor}"
+fi
 
 DLL_COUNT=$(find "$PKGDIR/system32" -name "*.dll" 2>/dev/null | wc -l)
 I686_DLL_COUNT=$(find "$PKGDIR/syswow64" -name "*.dll" 2>/dev/null | wc -l)
@@ -260,7 +354,7 @@ cat > "$PKGDIR/profile.json" << PROEOF
   "type": "DXVK",
   "versionName": "$DXVK_VERSION_NAME",
   "versionCode": 0,
-  "description": "DXVK GPLAsync-LowLatency $DXVK_VERSION — Oryon optimized (aarch64 + i686 PE)",
+  "description": "DXVK GPLAsync-LowLatency $DXVK_VERSION — Oryon optimized (arm64ec + i686 PE)",
   "files": [$DLL_FILES
   ]
 }

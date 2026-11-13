@@ -19,8 +19,9 @@ PACKAGES=$(python3 -c "
 import yaml, sys
 with open('$PACKAGES_FILE') as f:
     data = yaml.safe_load(f)
-for name in data:
-    print(name)
+for name, cfg in data.items():
+    if isinstance(cfg, dict) and cfg.get("output"):
+        print(name)
 ")
 
 if [ -z "$PACKAGES" ]; then
