@@ -772,10 +772,17 @@ package_wine() {
     done
 
     # metadata
+    # versionName MUST end with the arch: Winlator parses the content entry
+    # ("Wine-<versionName>-<versionCode>") with
+    #   ^(wine|proton)-([0-9.]+)-?([0-9.]+)?-(x86|x86_64|arm64ec)$
+    # after stripping the trailing "-<versionCode>". Anything appended after
+    # the arch (e.g. "11-arm64ec-7") fails to parse, WineInfo falls back to
+    # "<imagefs>/opt/proton-9.0-arm64ec", the prefixPack lookup misses and
+    # container creation fails. Use WINE_REV/versionCode for revisions only.
     cat > "$PKGDIR/profile.json" << PROEOF
 {
   "type": "Wine",
-  "versionName": "11-arm64ec-$WINE_REV",
+  "versionName": "11-arm64ec",
   "versionCode": $WINE_REV,
   "description": "Wine 11 Proton ARM64EC (ESYNC/FSYNC, Oryon optimized)",
   "files": [],
