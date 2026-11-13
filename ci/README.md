@@ -8,8 +8,12 @@ Three layers, deliberately separated:
 | **Static gate** (`ci/check-machine-types.sh`) | x86_64 | the artifacts have the right PE machine types and package layout |
 | **Runtime** (`ci/build-android-rootfs.sh` + `ci/run-android-rootfs-tests.sh`) | ARM64 Android runtime | Wine's loader maps the DLLs, imports resolve, DllMain runs |
 
-The first two run on every PR. The runtime job needs the Wine package, which is
-a ~1 hour build, so it runs on `schedule` / `workflow_dispatch` only.
+The first two run on every PR. The runtime jobs execute **our built
+`wine-arm64-*.wcp`**: they do not require a Wine build. `resolve-wine` takes the
+package from `build-wine` when that job ran, or from an existing package supplied
+by URL (dispatch input `wine_package_url` or repository variable
+`WINE_PACKAGE_URL`). A fresh `build-wine` is optional and only needed when no
+package exists yet.
 
 ---
 
@@ -19,8 +23,9 @@ a ~1 hour build, so it runs on `schedule` / `workflow_dispatch` only.
 |---|---|---|---|---|
 | `build-x64` | `ubuntu-latest` | — | `fexcore/build.sh`, `dxvk/build.sh`, `ci/build-test-programs.sh` in `Dockerfile.build` | PR, push, dispatch |
 | `static-check` | `ubuntu-latest` | `build-x64` | `ci/check-machine-types.sh` (no execution) | PR, push, dispatch |
-| `build-wine` | `ubuntu-latest` | — | `wine/build.sh --setup` in `Dockerfile.build`, then the gate on the package | schedule, dispatch (`build_wine`) |
-| `test-android-rootfs` | `ubuntu-24.04-arm` | build + gate + wine | the **shipped bionic Wine** inside a chroot built from an Android system image | schedule, dispatch |
+| `build-wine` | `ubuntu-latest` | — | optional `wine/build.sh --setup` in `Dockerfile.build`, then the gate | schedule, dispatch (`build_wine`) |
+| `resolve-wine` | `ubuntu-latest` | `build-wine` (optional) | selects our `wine-arm64-*.wcp` (artifact or URL), fetches Termux deps, runs the gate | when a package is available |
+| `test-android-rootfs` | `ubuntu-24.04-arm` | build + gate + resolve-wine | the **shipped bionic Wine** inside a chroot built from an Android system image | schedule, dispatch |
 | `test-android` | `ubuntu-24.04-arm` (+ KVM) | same | the same Wine in an `arm64-v8a` AVD, over adb | schedule, dispatch |
 | `test-android-device` | `[self-hosted, android, arm64]` | same | the same Wine on a physical Android/Termux device | repo var `ANDROID_DEVICE_RUNNER=true` |
 | `test-linux-dlls` | `ubuntu-24.04-arm` | build + gate | the PE DLLs under a **Linux glibc ARM64X Wine** (not the Android package) | dispatch (`run_linux_dll_tests`) |
@@ -32,6 +37,22 @@ Repository variables that gate the runtime jobs:
 | `ANDROID_ROOTFS=false` | skip the rootfs job |
 | `ANDROID_EMULATOR=false` | skip the emulator job |
 | `ANDROID_DEVICE_RUNNER=true` | enable the self-hosted Android/Termux job |
+
+### Using an existing Wine package
+
+The runtime jobs never build Wine unless asked. Point them at an existing
+`wine-arm64-*.wcp`:
+
+- Dispatch with `wine_package_url=<direct URL>` (and optionally
+  `termux_rootfs_url=<termux-rootfs.txz>`).
+- Or set the repository variable `WINE_PACKAGE_URL` to the same URL so scheduled
+  runs use it.
+
+`resolve-wine` downloads it, runs `ci/check-machine-types.sh` against it, fetches
+the Termux deps with `wine/build.sh --setup-deps` when no rootfs archive was
+supplied, and uploads `wine-package` + `termux-rootfs` for the Android jobs. For
+private repositories, use a signed URL or an uploaded artifact, since the job
+uses plain `curl`.
 
 `ubuntu-24.04-arm` is GitHub-hosted for public repositories. Private repos must
 either enable the larger ARM64 runners or set the job to a self-hosted ARM64
@@ -275,7 +296,9 @@ push).
 - **Runtime coverage is schedule/dispatch only.** PR CI is the x64 static gate.
   A PR that changes Wine/FEX/DXVK semantics without changing machine types can
   still merge without a runtime signal.
-- **`build-wine` is the expensive dependency.** Every runtime job consumes its
+- **`build-wine` is optional.** Runtime jobs consume `resolve-wine`, which takes
+  an existing package by URL; `build-wine` is only for producing a fresh one. It
+  was the expensive dependency; every runtime job consumes its
   artifacts, so they only run when Wine was built in the same workflow run.
   There is no "reuse the last good wine artifact" mechanism yet.
 - **Emulator availability.** The arm64-v8a AVD needs an ARM64 host with KVM.

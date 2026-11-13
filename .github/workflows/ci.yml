@@ -5,6 +5,7 @@ name: ci
 #   build-x64            ubuntu-latest     cross-build fexcore + dxvk + PE tests
 #   static-check         ubuntu-latest     PE machine-type / package gate (no exec)
 #   build-wine           ubuntu-latest     optional wine-arm64 package (slow)
+#   resolve-wine         ubuntu-latest     picks an existing package (URL/artifact)
 #   test-android-rootfs  ubuntu-24.04-arm  REAL runtime: bionic Wine in a chroot
 #   test-android         ubuntu-24.04-arm  REAL runtime: arm64-v8a emulator
 #   test-android-device  self-hosted       REAL runtime: physical Android/Termux
@@ -30,6 +31,14 @@ on:
         description: "Supplementary: run PE DLLs under a Linux ARM64X Wine"
         type: boolean
         default: false
+      wine_package_url:
+        description: "URL of an existing wine-arm64-*.wcp (skips the build-wine job)"
+        type: string
+        default: ""
+      termux_rootfs_url:
+        description: "URL of an existing termux-rootfs.txz (optional; otherwise fetched with --setup-deps)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -273,6 +282,104 @@ jobs:
           if-no-files-found: ignore
 
   # -------------------------------------------------------------------------
+  # Select the Wine package the runtime jobs will execute: an artifact from
+  # build-wine if that ran, otherwise an existing package supplied by URL.
+  # This is what lets the Android jobs run OUR built wine-arm64-*.wcp without
+  # paying for a full Wine build on every run.
+  # -------------------------------------------------------------------------
+  resolve-wine:
+    needs: [build-wine]
+    if: >-
+      always() &&
+      (needs.build-wine.result == 'success' ||
+       inputs.wine_package_url != '' ||
+       vars.WINE_PACKAGE_URL != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wine artifacts from build-wine (if any)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download supplied wine package
+        if: inputs.wine_package_url != '' || vars.WINE_PACKAGE_URL != ''
+        env:
+          WINE_URL: ${{ inputs.wine_package_url || vars.WINE_PACKAGE_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          curl -fL --retry 3 -o artifacts/wine-arm64-supplied.wcp "$WINE_URL"
+
+      - name: Download supplied Termux rootfs
+        if: inputs.termux_rootfs_url != ''
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          curl -fL --retry 3 -o artifacts/termux-rootfs.txz "${{ inputs.termux_rootfs_url }}"
+
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.termux_rootfs_url == ''
+      - name: Build builder image (for --setup-deps when needed)
+        if: inputs.termux_rootfs_url == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ci
+          file: ci/Dockerfile.build
+          load: true
+          tags: ${{ env.BUILDER_IMAGE }}
+          build-args: |
+            LLVM_MINGW_VERSION=${{ env.LLVM_MINGW_VERSION }}
+            ARM64EC_LLVM_MINGW_VERSION=${{ env.ARM64EC_LLVM_MINGW_VERSION }}
+            NDK_VERSION=${{ env.NDK_VERSION }}
+          cache-from: type=gha,scope=builder
+          cache-to: type=gha,scope=builder,mode=max
+
+      - name: Fetch Termux deps if no rootfs archive was supplied
+        if: inputs.termux_rootfs_url == ''
+        run: |
+          set -euo pipefail
+          if [ -s artifacts/termux-rootfs.txz ]; then
+            echo "Using Termux rootfs from the build-wine artifact"
+            exit 0
+          fi
+          docker run --rm             -v "$GITHUB_WORKSPACE:/src" -w /src             --user "$(id -u):$(id -g)" -e HOME=/tmp             "$BUILDER_IMAGE" bash -lc './wine/build.sh --setup-deps'
+          tar -cJf artifacts/termux-rootfs.txz -C wine/workdir/termux-rootfs .
+
+      - name: Verify package and rootfs
+        run: |
+          set -euo pipefail
+          ls -la artifacts
+          wine="$(ls artifacts/wine-arm64-*.wcp 2> /dev/null | head -1)"
+          test -n "$wine" || {
+            echo "::error::No wine package. Set wine_package_url (or build_wine=true)."
+            exit 1
+          }
+          test -s artifacts/termux-rootfs.txz || {
+            echo "::error::No Termux rootfs archive."
+            exit 1
+          }
+          ci/check-machine-types.sh --wine "$wine" --strict-missing
+
+      - name: Upload selected artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-package
+          path: artifacts/wine-arm64-*.wcp
+          overwrite: true
+
+      - name: Upload selected Termux rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-rootfs
+          path: artifacts/termux-rootfs.txz
+          overwrite: true
+
+  # -------------------------------------------------------------------------
   # REAL runtime test (preferred): the shipped bionic Wine inside an Android
   # rootfs on an ARM64 runner.
   #
@@ -282,12 +389,12 @@ jobs:
   # No emulator, no qemu: chroot is enough once /system is present.
   # -------------------------------------------------------------------------
   test-android-rootfs:
-    needs: [build-x64, static-check, build-wine]
+    needs: [build-x64, static-check, resolve-wine]
     if: >-
       always() &&
       needs.build-x64.result == 'success' &&
       needs.static-check.result == 'success' &&
-      needs.build-wine.result == 'success' &&
+      needs.resolve-wine.result == 'success' &&
       vars.ANDROID_ROOTFS != 'false'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
@@ -367,12 +474,12 @@ jobs:
   # package is ARM64/bionic, and an x86_64 AVD cannot run it at all.
   # -------------------------------------------------------------------------
   test-android:
-    needs: [build-x64, static-check, build-wine]
+    needs: [build-x64, static-check, resolve-wine]
     if: >-
       always() &&
       needs.build-x64.result == 'success' &&
       needs.static-check.result == 'success' &&
-      needs.build-wine.result == 'success' &&
+      needs.resolve-wine.result == 'success' &&
       vars.ANDROID_EMULATOR != 'false'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
@@ -434,12 +541,12 @@ jobs:
   # Enable by setting the repository variable ANDROID_DEVICE_RUNNER=true.
   # -------------------------------------------------------------------------
   test-android-device:
-    needs: [build-x64, static-check, build-wine]
+    needs: [build-x64, static-check, resolve-wine]
     if: >-
       always() &&
       needs.build-x64.result == 'success' &&
       needs.static-check.result == 'success' &&
-      needs.build-wine.result == 'success' &&
+      needs.resolve-wine.result == 'success' &&
       vars.ANDROID_DEVICE_RUNNER == 'true'
     runs-on: [self-hosted, android, arm64]
     timeout-minutes: 120
