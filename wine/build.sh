@@ -628,6 +628,8 @@ package_wine() {
     cd "$WORKDIR/wine"
 
     WINE_VERSION=$(git rev-parse --short HEAD)
+    # Profile revision for side-by-side testing; override with WINE_REV=...
+    WINE_REV="${WINE_REV:-7}"
     PKGDIR="$WORKDIR/package"
     rm -rf "$PKGDIR"
     mkdir -p "$PKGDIR/bin"
@@ -770,11 +772,11 @@ package_wine() {
     done
 
     # metadata
-    cat > "$PKGDIR/profile.json" << 'PROEOF'
+    cat > "$PKGDIR/profile.json" << PROEOF
 {
   "type": "Wine",
-  "versionName": "11-arm64ec",
-  "versionCode": 6,
+  "versionName": "11-arm64ec-$WINE_REV",
+  "versionCode": $WINE_REV,
   "description": "Wine 11 Proton ARM64EC (ESYNC/FSYNC, Oryon optimized)",
   "files": [],
   "wine": { "binPath": "bin", "libPath": "lib", "prefixPack": "prefixPack.txz" }
@@ -795,6 +797,7 @@ PROEOF
 CONFEOF
 
     OUTPUT_FILE=$(yq ".${PKG_NAME}.output" "$ROOT_DIR/packages.yml" | sed "s/{version}/$WINE_VERSION/")
+    OUTPUT_FILE="${OUTPUT_FILE%.wcp}-ec${WINE_REV}.wcp"
     WCP_FILE="$ROOT_DIR/$OUTPUT_FILE"
     echo "Compressing package..."
     (cd "$PKGDIR" && tar --format=gnu --owner=0 --group=0 -cf - \
