@@ -139,7 +139,7 @@ setup_compiler_flags() {
     fi
     export CPPFLAGS="${DEPS:+-I$DEPS/include }--sysroot=${SYSROOT}"
     export LDFLAGS="${DEPS:+-L$DEPS/lib }${LD_EXTRA} -Wl,-rpath=${RUNTIME_PATH}/lib -Wl,-rpath=\\\$\$ORIGIN/../../lib"
-    export PKG_CONFIG_LIBDIR="${DEPS:+$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig}"
+    export PKG_CONFIG_LIBDIR="${SDL2_PREFIX:+$SDL2_PREFIX/lib/pkgconfig:}${DEPS:+$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig}"
 
     echo "HOST CC = $($CC --version 2> /dev/null | head -1 || echo "$CC")"
     echo "PE CC   = $(aarch64-w64-mingw32-clang --version 2> /dev/null | head -1 || echo aarch64-w64-mingw32-clang)"
@@ -149,8 +149,13 @@ setup_compiler_flags() {
         export FREETYPE_CFLAGS="-I$DEPS/include/freetype2"
         export PULSE_CFLAGS="-I$DEPS/include/pulse"
         export PULSE_LIBS="-L$DEPS/lib/pulseaudio -lpulse"
-        export SDL2_CFLAGS="-I$DEPS/include/SDL2"
-        export SDL2_LIBS="-L$DEPS/lib -lSDL2"
+        if [ -n "$SDL2_PREFIX" ]; then
+            export SDL2_CFLAGS="-I$SDL2_PREFIX/include/SDL2"
+            export SDL2_LIBS="-L$SDL2_PREFIX/lib -lSDL2"
+        else
+            export SDL2_CFLAGS="-I$DEPS/include/SDL2"
+            export SDL2_LIBS="-L$DEPS/lib -lSDL2"
+        fi
         export FONTCONFIG_LIBS="-L$DEPS/lib -lfontconfig -lfreetype -lexpat"
         export X_CFLAGS="-I$DEPS/include"
         export X_LIBS="-lX11 -lXext -landroid-sysvshm"
@@ -400,6 +405,13 @@ configure_wine() {
         WINE_TOOLS_OPT="--with-wine-tools=$WORKDIR/wine-tools"
     fi
 
+    if [ -n "$SDL2_PREFIX" ] && [ -f "$SDL2_PREFIX/lib/libSDL2.so" ]; then
+        SDL_OPT="--with-sdl"
+    else
+        SDL_OPT="--without-sdl"
+        warn "SDL2_PREFIX not set: building without SDL, controllers will not work"
+    fi
+
     echo "Configuring Wine (aarch64-linux-android)..."
     ./configure \
         --enable-archs="$WIN_ARCH" --host="$TARGET" \
@@ -415,7 +427,7 @@ configure_wine() {
         --without-krb5 --without-netapi --without-opencl --with-opengl \
         --without-osmesa --without-oss --without-pcap --without-pcsclite \
         --without-piper --with-pthread --with-pulse --without-sane \
-        --without-sdl --without-udev --without-unwind --without-usb \
+        ${SDL_OPT} --without-udev --without-unwind --without-usb \
         --without-v4l2 --without-vosk --with-vulkan --without-wayland \
         --without-xcomposite --without-xfixes --without-xinerama \
         --without-xrandr --without-xrender --without-xshape --with-xshm \
@@ -629,7 +641,7 @@ package_wine() {
 
     WINE_VERSION=$(git rev-parse --short HEAD)
     # Profile revision for side-by-side testing; override with WINE_REV=...
-    WINE_REV="${WINE_REV:-7}"
+    WINE_REV="${WINE_REV:-16}"
     PKGDIR="$WORKDIR/package"
     rm -rf "$PKGDIR"
     mkdir -p "$PKGDIR/bin"
