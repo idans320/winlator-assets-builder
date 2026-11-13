@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1.7
+#
+# ci/Dockerfile.test — ARM64 Android test kit.
+#
+# IMPORTANT: this image does NOT run the Wine package.
+#
+# The wine-arm64-*.wcp loader is built with --host=aarch64-linux-android28:
+# bionic, interpreter /system/bin/linker64, RUNPATH
+# /data/data/com.termux/files/usr/lib. It can only execute on Android. Neither
+# an Ubuntu arm64 container nor a bare proot over the build-time Termux rootfs
+# works — that rootfs contains only data/data/com.termux/files/usr, with no
+# /system partition and therefore no linker64.
+#
+# This image therefore packages the *payload and the driver*, and drives an
+# external Android target over adb:
+#   - an arm64-v8a Android emulator (API 27+, userdebug so `adb root` works), or
+#   - a self-hosted ARM64 Android device (USB or `adb connect`).
+#
+# Modes (see ci/docker-entrypoint.sh):
+#   docker run --rm IMAGE                 # static machine-type gate (no device)
+#   docker run --rm --network host \
+#       -e ANDROID_SERIAL=emulator-5554 IMAGE android
+#   docker run --rm -e ANDROID_SERIAL=... \
+#       -v /dev/bus/usb:/dev/bus/usb IMAGE android   # USB-attached device
+#
+# The image is built for linux/arm64 so the adb/llvm tooling matches the host;
+# it is not runnable on x64 without qemu, and even then the *tests* would still
+# need a real ARM64 Android target. qemu-user is not a valid substitute for
+# FEX-in-Wine: FEX has to execute ARM64/ARM64EC code, and qemu emulating the
+# whole Wine process is extremely slow and has crashed in practice.
+#
+# Build:
+#   ci/docker-build-test-image.sh --wine wine-arm64-*.wcp \
+#       --fexcore fexcore-*.wcp --dxvk dxvk-*.wcp --tests ci/build/tests \
+#       --termux-rootfs wine/workdir/termux-rootfs
+
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    bash \
+    coreutils \
+    tar \
+    xz-utils \
+    unzip \
+    zip \
+    file \
+    python3 \
+    llvm \
+    adb \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ci/ (scripts) and the staged artifacts. The build context is assembled by
+# ci/docker-build-test-image.sh; it contains ci/, artifacts/ and Dockerfile.test.
+COPY ci/ /opt/ci/
+COPY artifacts/ /opt/artifacts/
+
+RUN chmod +x /opt/ci/*.sh \
+    && ln -sf /opt/ci/check-machine-types.sh /usr/local/bin/ci-static \
+    && ln -sf /opt/ci/android-run-tests.sh /usr/local/bin/ci-android
+
+ENV ARTIFACTS=/opt/artifacts \
+    ANDROID_SERIAL="" \
+    TERMUX_USR=/data/data/com.termux/files/usr
+
+ENTRYPOINT ["/opt/ci/docker-entrypoint.sh"]
+CMD ["auto"]

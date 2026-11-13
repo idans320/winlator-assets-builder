@@ -1,0 +1,147 @@
+# syntax=docker/dockerfile:1.7
+#
+# ci/Dockerfile.build — x86_64 cross-build environment for the Winlator assets.
+#
+# Provides everything the component build scripts need without devbox:
+#   - Android NDK (wine, mesa, box64)
+#   - upstream llvm-mingw (fexcore, dxvk)     [pinned by packages.yml:mingw_ver]
+#   - bylaws llvm-mingw (ARM64EC)             [pinned by packages.yml:toolchain]
+#   - meson/ninja/cmake/clang/lld, autotools, yq, python3 + yaml/mako
+#
+# The versions below MUST match packages.yml. ci/check-machine-types.sh cannot
+# verify that, so the workflow prints both and fails on a mismatch.
+#
+# Build (context is ci/, no source is copied into the image):
+#   docker build -f ci/Dockerfile.build -t winlator-builder ci/
+#
+# Run (the repo is mounted, artifacts land in the workspace):
+#   docker run --rm -v "$PWD:/src" -w /src \
+#       --user "$(id -u):$(id -g)" -e HOME=/tmp \
+#       winlator-builder bash -lc './fexcore/build.sh && ./dxvk/build.sh'
+#
+# Notes:
+#   - The repo's scripts prefer `devbox run`; here the same tools are on PATH,
+#     so they are invoked directly. NDK/ANDROID_HOME/ARM64EC_MINGW_ROOT are
+#     exported because wine/build.sh and mesa/build.sh read them.
+#   - wine/build.sh --setup-deps downloads Termux .deb files from
+#     packages.termux.dev and extracts them with `ar`; binutils is installed for
+#     that. Cache wine/workdir/termux-rootfs and wine/workdir/deb-cache between
+#     runs (see .github/workflows/ci.yml).
+
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG HOST_ARCH=x86_64
+
+# Pinned to packages.yml. Override both together; the workflow compares.
+ARG LLVM_MINGW_VERSION=20260519
+ARG ARM64EC_LLVM_MINGW_VERSION=20250920
+ARG NDK_VERSION=29.0.14206865
+ARG NDK_ZIP=android-ndk-r29-linux.zip
+ARG NDK_DIR=android-ndk-r29
+ARG YQ_VERSION=v4.44.3
+# Optional integrity pins (empty = skip). Fill these in for reproducible builds.
+ARG NDK_SHA256=""
+ARG LLVM_MINGW_SHA256=""
+ARG ARM64EC_LLVM_MINGW_SHA256=""
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    NDK=/opt/android-sdk/ndk/${NDK_VERSION} \
+    LLVM_MINGW_ROOT=/opt/llvm-mingw \
+    ARM64EC_MINGW_ROOT=/opt/llvm-mingw-arm64ec \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    xz-utils \
+    zip \
+    unzip \
+    tar \
+    file \
+    build-essential \
+    cmake \
+    ninja-build \
+    meson \
+    pkg-config \
+    clang \
+    lld \
+    llvm \
+    python3 \
+    python3-yaml \
+    python3-mako \
+    bison \
+    flex \
+    libxml2-dev \
+    autoconf \
+    automake \
+    libtool \
+    make \
+    perl \
+    patchelf \
+    binutils \
+    gettext \
+    jq \
+    ccache \
+    libssl-dev \
+    zlib1g-dev \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+# yq (mikefarah v4 — the scripts use `yq '.a.b // ""' file` syntax)
+RUN curl -fsSL -o /usr/local/bin/yq \
+    "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+    && chmod +x /usr/local/bin/yq \
+    && yq --version
+
+# Android NDK (wine/, mesa/, box64/)
+RUN mkdir -p /opt/android-sdk/ndk \
+    && curl -fsSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/${NDK_ZIP}" \
+    && if [ -n "$NDK_SHA256" ]; then echo "${NDK_SHA256}  /tmp/ndk.zip" | sha256sum -c -; fi \
+    && unzip -q /tmp/ndk.zip -d /tmp/ndk \
+    && mv "/tmp/ndk/${NDK_DIR}" "${NDK}" \
+    && rm -rf /tmp/ndk /tmp/ndk.zip \
+    && test -x "${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+    && printf '%s\n' "$NDK_VERSION" > "${NDK}/.ci-version"
+
+# Upstream llvm-mingw (the version pinned for fexcore/dxvk in packages.yml)
+RUN mkdir -p "${LLVM_MINGW_ROOT}" \
+    && curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-${HOST_ARCH}.tar.xz" \
+    && if [ -n "$LLVM_MINGW_SHA256" ]; then echo "${LLVM_MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | sha256sum -c -; fi \
+    && tar -xJf /tmp/llvm-mingw.tar.xz -C "${LLVM_MINGW_ROOT}" --strip-components=1 \
+    && rm -f /tmp/llvm-mingw.tar.xz \
+    && printf '%s\n' "$LLVM_MINGW_VERSION" > "${LLVM_MINGW_ROOT}/.ci-version" \
+    && test -x "${LLVM_MINGW_ROOT}/bin/aarch64-w64-mingw32-clang" \
+    && test -x "${LLVM_MINGW_ROOT}/bin/i686-w64-mingw32-clang"
+
+# bylaws llvm-mingw — the only toolchain with ARM64EC runtime libraries
+# (FEX's Data/CMake/toolchain_mingw.cmake + libarm64ecfex.dll need it).
+RUN mkdir -p "${ARM64EC_MINGW_ROOT}" \
+    && curl -fsSL -o /tmp/llvm-mingw-arm64ec.tar.xz \
+    "https://github.com/bylaws/llvm-mingw/releases/download/${ARM64EC_LLVM_MINGW_VERSION}/llvm-mingw-${ARM64EC_LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-${HOST_ARCH}.tar.xz" \
+    && if [ -n "$ARM64EC_LLVM_MINGW_SHA256" ]; then echo "${ARM64EC_LLVM_MINGW_SHA256}  /tmp/llvm-mingw-arm64ec.tar.xz" | sha256sum -c -; fi \
+    && tar -xJf /tmp/llvm-mingw-arm64ec.tar.xz -C "${ARM64EC_MINGW_ROOT}" --strip-components=1 \
+    && rm -f /tmp/llvm-mingw-arm64ec.tar.xz \
+    && printf '%s\n' "$ARM64EC_LLVM_MINGW_VERSION" > "${ARM64EC_MINGW_ROOT}/.ci-version" \
+    && test -x "${ARM64EC_MINGW_ROOT}/bin/arm64ec-w64-mingw32-clang"
+
+# Upstream llvm-mingw first (matches packages.yml mingw_ver for the aarch64 and
+# i686 PE builds); the ARM64EC toolchain second so `arm64ec-w64-mingw32-*` and
+# `llvm-dlltool` resolve. FEX's ARM64EC build rewrites its dlltool call to a
+# bare `llvm-dlltool -m arm64ec`, which both toolchains' llvm-dlltool accepts.
+ENV PATH=/opt/llvm-mingw/bin:/opt/llvm-mingw-arm64ec/bin:${PATH}
+
+RUN printf 'builder image ready\n' \
+    && clang --version | head -1 \
+    && cmake --version | head -1 \
+    && meson --version \
+    && "${ARM64EC_MINGW_ROOT}/bin/arm64ec-w64-mingw32-clang" --version | head -1 \
+    && test -x "${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+    && echo "NDK: ${NDK}"
+
+WORKDIR /src

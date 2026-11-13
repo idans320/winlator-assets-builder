@@ -1,0 +1,546 @@
+name: ci
+
+# What runs where (see ci/README.md for the full rationale):
+#
+#   build-x64            ubuntu-latest     cross-build fexcore + dxvk + PE tests
+#   static-check         ubuntu-latest     PE machine-type / package gate (no exec)
+#   build-wine           ubuntu-latest     optional wine-arm64 package (slow)
+#   test-android-rootfs  ubuntu-24.04-arm  REAL runtime: bionic Wine in a chroot
+#   test-android         ubuntu-24.04-arm  REAL runtime: arm64-v8a emulator
+#   test-android-device  self-hosted       REAL runtime: physical Android/Termux
+#   test-linux-dlls      ubuntu-24.04-arm  supplementary: Linux ARM64X Wine
+#
+# Only the test-android* jobs execute the shipped Android Wine package. The PE
+# DLLs cannot run on an x86_64 runner at all, and the Android Wine cannot run on
+# a Linux runner without the /system image (bionic, /system/bin/linker64).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      build_wine:
+        description: "Build the wine-arm64 package (slow, ~60-120 min)"
+        type: boolean
+        default: false
+      run_linux_dll_tests:
+        description: "Supplementary: run PE DLLs under a Linux ARM64X Wine"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILDER_IMAGE: winlator-builder:ci
+  TEST_IMAGE: winlator-test:ci
+  # Must match packages.yml; verified inside the builder image before building.
+  LLVM_MINGW_VERSION: "20260519"
+  ARM64EC_LLVM_MINGW_VERSION: "20250920"
+  NDK_VERSION: "29.0.14206865"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Cross-build the PE components on x86_64
+  # -------------------------------------------------------------------------
+  build-x64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: ci
+          file: ci/Dockerfile.build
+          load: true
+          tags: ${{ env.BUILDER_IMAGE }}
+          build-args: |
+            LLVM_MINGW_VERSION=${{ env.LLVM_MINGW_VERSION }}
+            ARM64EC_LLVM_MINGW_VERSION=${{ env.ARM64EC_LLVM_MINGW_VERSION }}
+            NDK_VERSION=${{ env.NDK_VERSION }}
+          cache-from: type=gha,scope=builder
+          cache-to: type=gha,scope=builder,mode=max
+
+      - name: Build fexcore, dxvk and the PE test programs
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            "$BUILDER_IMAGE" bash -lc '
+              set -euo pipefail
+
+              # Toolchain pins must match packages.yml: the image bakes them in,
+              # the build scripts read packages.yml. A mismatch silently builds
+              # with a different compiler than the project pins.
+              pin_fex=$(yq ".fexcore.mingw_ver" packages.yml)
+              pin_wine=$(yq ".wine.mingw_ver" packages.yml)
+              pin_ec=$(yq ".toolchain.arm64ec_mingw.version" packages.yml)
+              img_fex=$(cat /opt/llvm-mingw/.ci-version)
+              img_ec=$(cat /opt/llvm-mingw-arm64ec/.ci-version)
+              echo "llvm-mingw: packages.yml=$pin_fex image=$img_fex"
+              echo "arm64ec:    packages.yml=$pin_ec image=$img_ec"
+              [ "$pin_fex" = "$img_fex" ] || { echo "::error::llvm-mingw pin mismatch ($pin_fex vs $img_fex)"; exit 1; }
+              [ "$pin_wine" = "$img_fex" ] || { echo "::error::wine mingw pin mismatch ($pin_wine vs $img_fex)"; exit 1; }
+              [ "$pin_ec" = "$img_ec" ] || { echo "::error::ARM64EC pin mismatch ($pin_ec vs $img_ec)"; exit 1; }
+
+              ./fexcore/build.sh
+              ./dxvk/build.sh
+              ./ci/build-test-programs.sh
+            '
+
+      - name: Collect build logs
+        if: always()
+        run: |
+          mkdir -p ci-logs/build
+          for f in fexcore/workdir/build_log fexcore/workdir/build_log_arm64ec \
+                   fexcore/workdir/cmake_log fexcore/workdir/cmake_log_arm64ec \
+                   dxvk/workdir/build_log dxvk/workdir/build_log_i686 \
+                   dxvk/workdir/meson_log dxvk/workdir/meson_log_i686; do
+            [ -f "$f" ] && cp "$f" "ci-logs/build/$(echo "$f" | tr '/' '_')"
+          done
+          true
+
+      - name: Upload fexcore package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fexcore-package
+          path: fexcore-*.wcp
+          if-no-files-found: error
+
+      - name: Upload dxvk package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxvk-package
+          path: |
+            dxvk-*.wcp
+            *-arm64ec-gplasync.wcp
+          if-no-files-found: error
+
+      - name: Upload PE test programs
+        uses: actions/upload-artifact@v4
+        with:
+          name: pe-tests
+          path: ci/build/tests/*.exe
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # Static gate: machine types + package layout, no execution needed
+  # -------------------------------------------------------------------------
+  static-check:
+    needs: build-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Ensure llvm-readobj is available
+        run: |
+          if ! command -v llvm-readobj >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y llvm
+          fi
+          llvm-readobj --version | head -1
+
+      - name: Machine-type and packaging gate
+        run: |
+          set -euo pipefail
+          WINE_ARG=()
+          if ls artifacts/wine-arm64-*.wcp >/dev/null 2>&1; then
+            WINE_ARG=(--wine "$(ls artifacts/wine-arm64-*.wcp | head -1)")
+          fi
+          ci/check-machine-types.sh \
+            --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --tests artifacts \
+            "${WINE_ARG[@]}"
+
+  # -------------------------------------------------------------------------
+  # Optional: the Android Wine package. Slow (full Wine cross-build), so it
+  # runs on schedule/dispatch only. Its artifacts feed the Android test jobs.
+  # -------------------------------------------------------------------------
+  build-wine:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_wine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: ci
+          file: ci/Dockerfile.build
+          load: true
+          tags: ${{ env.BUILDER_IMAGE }}
+          build-args: |
+            LLVM_MINGW_VERSION=${{ env.LLVM_MINGW_VERSION }}
+            ARM64EC_LLVM_MINGW_VERSION=${{ env.ARM64EC_LLVM_MINGW_VERSION }}
+            NDK_VERSION=${{ env.NDK_VERSION }}
+          cache-from: type=gha,scope=builder
+          cache-to: type=gha,scope=builder,mode=max
+
+      # wine/build.sh --setup-deps downloads Termux deps from
+      # packages.termux.dev into wine/workdir/termux-rootfs and keeps the .deb
+      # cache. Both are expensive; cache them. The source clone is cached too.
+      - name: Cache wine deps and source
+        uses: actions/cache@v4
+        with:
+          path: |
+            wine/workdir/termux-rootfs
+            wine/workdir/deb-cache
+            wine/workdir/wine
+          key: wine-deps-${{ hashFiles('packages.yml', 'wine/build.sh', 'wine/patches/**') }}
+
+      - name: Refresh cached wine checkout
+        run: |
+          set -euo pipefail
+          if [ -d wine/workdir/wine/.git ]; then
+            branch="$(git -C wine/workdir/wine branch --show-current)"
+            git -C wine/workdir/wine fetch --depth 1 origin "$branch"
+            git -C wine/workdir/wine reset --hard FETCH_HEAD
+          fi
+
+      - name: Build wine package
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            "$BUILDER_IMAGE" bash -lc './wine/build.sh --setup'
+
+      - name: Package gate (wine only)
+        run: |
+          set -euo pipefail
+          ci/check-machine-types.sh \
+            --wine "$(ls wine-arm64-*.wcp | head -1)" \
+            --strict-missing
+
+      - name: Bundle Termux rootfs for the Android job
+        run: |
+          set -euo pipefail
+          tar -cJf termux-rootfs.txz -C wine/workdir/termux-rootfs .
+
+      - name: Upload wine package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-package
+          path: wine-arm64-*.wcp
+          if-no-files-found: error
+
+      - name: Upload Termux rootfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-rootfs
+          path: termux-rootfs.txz
+          if-no-files-found: error
+
+      - name: Upload wine logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-logs
+          path: |
+            wine/workdir/*log*
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # REAL runtime test (preferred): the shipped bionic Wine inside an Android
+  # rootfs on an ARM64 runner.
+  #
+  # /system from an arm64-v8a system image supplies /system/bin/linker64 and
+  # the Android libs; the Termux prefix must sit at
+  # /data/data/com.termux/files/usr because that path is a hardcoded RUNPATH.
+  # No emulator, no qemu: chroot is enough once /system is present.
+  # -------------------------------------------------------------------------
+  test-android-rootfs:
+    needs: [build-x64, static-check, build-wine]
+    if: >-
+      always() &&
+      needs.build-x64.result == 'success' &&
+      needs.static-check.result == 'success' &&
+      needs.build-wine.result == 'success' &&
+      vars.ANDROID_ROOTFS != 'false'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract Termux rootfs
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/termux-rootfs
+          tar -xJf artifacts/termux-rootfs.txz -C artifacts/termux-rootfs
+
+      - name: Install rootfs tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fsprogs android-sdk-libsparse-utils openjdk-17-jre-headless \
+            unzip curl binutils
+
+      - name: Cache Android SDK system image
+        uses: actions/cache@v4
+        with:
+          path: ~/android-sdk
+          key: android-sdk-system-images-28-arm64-v8a
+
+      - name: Install sdkmanager
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
+            mkdir -p "$HOME/android-sdk/cmdline-tools"
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+            unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+            mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" \
+               "$HOME/android-sdk/cmdline-tools/latest"
+          fi
+          yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" \
+            --licenses > /dev/null || true
+
+      - name: Build Android rootfs
+        run: |
+          set -euo pipefail
+          ci/build-android-rootfs.sh \
+            --root "$PWD/ci-root" \
+            --android-home "$HOME/android-sdk" \
+            --sdk-package "system-images;android-28;default;arm64-v8a" \
+            --termux-rootfs artifacts/termux-rootfs \
+            --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
+            --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --tests artifacts
+
+      - name: Run DLL tests in the rootfs
+        run: |
+          ci/run-android-rootfs-tests.sh \
+            --root "$PWD/ci-root" \
+            --runner chroot \
+            --log-dir "$PWD/ci-logs/android-rootfs"
+
+      - name: Upload rootfs test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-rootfs-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # REAL runtime test: arm64 Android emulator (API 28+, userdebug for adb root)
+  #
+  # Alternative to the rootfs job. The emulator must be arm64-v8a: the Wine
+  # package is ARM64/bionic, and an x86_64 AVD cannot run it at all.
+  # -------------------------------------------------------------------------
+  test-android:
+    needs: [build-x64, static-check, build-wine]
+    if: >-
+      always() &&
+      needs.build-x64.result == 'success' &&
+      needs.static-check.result == 'success' &&
+      needs.build-wine.result == 'success' &&
+      vars.ANDROID_EMULATOR != 'false'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract Termux rootfs
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/termux-rootfs
+          tar -xJf artifacts/termux-rootfs.txz -C artifacts/termux-rootfs
+
+      - name: Check KVM (arm64 emulator requires it)
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is missing. The arm64-v8a emulator needs hardware" \
+                 "virtualization; use a self-hosted ARM64 runner with KVM, or the" \
+                 "test-android-device job."
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm || true
+
+      - name: Run DLL tests on arm64-v8a emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 28
+          target: default
+          arch: arm64-v8a
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -no-snapshot -camera-back none -camera-front none
+          script: |
+            ci/android-run-tests.sh \
+              --serial emulator-5554 \
+              --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
+              --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
+              --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+              --tests artifacts \
+              --termux-rootfs artifacts/termux-rootfs \
+              --log-dir "$PWD/ci-logs/android"
+
+      - name: Upload Android test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # Alternative runtime: a self-hosted ARM64 Android/Termux runner.
+  # Enable by setting the repository variable ANDROID_DEVICE_RUNNER=true.
+  # -------------------------------------------------------------------------
+  test-android-device:
+    needs: [build-x64, static-check, build-wine]
+    if: >-
+      always() &&
+      needs.build-x64.result == 'success' &&
+      needs.static-check.result == 'success' &&
+      needs.build-wine.result == 'success' &&
+      vars.ANDROID_DEVICE_RUNNER == 'true'
+    runs-on: [self-hosted, android, arm64]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Run DLL tests on the device (already inside Termux)
+        run: |
+          set -euo pipefail
+          termux_rootfs_args=()
+          if [ -d artifacts/termux-rootfs/data/data/com.termux/files/usr ]; then
+            termux_rootfs_args=(--termux-rootfs artifacts/termux-rootfs)
+          fi
+          ci/android-run-tests.sh --local \
+            --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
+            --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --tests artifacts \
+            "${termux_rootfs_args[@]}" \
+            --log-dir "$PWD/ci-logs/android-local"
+
+      - name: Upload device logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-device-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # Supplementary (dispatch only): run the PE DLLs under a *Linux* ARM64X Wine.
+  # Validates machine types/imports/DllMain on a glibc host; it does NOT
+  # validate the Android Wine package.
+  # -------------------------------------------------------------------------
+  test-linux-dlls:
+    needs: [build-x64, static-check]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_linux_dll_tests &&
+      needs.build-x64.result == 'success'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake bison flex gettext pkg-config \
+            python3 git xz-utils ca-certificates llvm
+
+      - name: Install ARM64EC llvm-mingw
+        run: |
+          # Uses the repo pin in packages.yml (same script the build uses).
+          ./scripts/setup-arm64ec-toolchain.sh
+
+      - name: Cache ARM64EC toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain/
+          key: arm64ec-mingw-${{ runner.arch }}-${{ hashFiles('packages.yml') }}
+
+      - name: Cache Linux test Wine
+        uses: actions/cache@v4
+        with:
+          path: ci/build/wine-test
+          key: wine-test-${{ runner.arch }}-${{ hashFiles('packages.yml', 'ci/build-wine-test.sh') }}
+
+      - name: Build Linux ARM64X Wine (test fixture)
+        run: |
+          if [ ! -x ci/build/wine-test/bin/wine ]; then
+            ci/build-wine-test.sh --prefix "$PWD/ci/build/wine-test" --jobs "$(nproc)"
+          fi
+
+      - name: Run PE DLL tests
+        run: |
+          set -euo pipefail
+          ci/run-wine-tests.sh \
+            --wine "$PWD/ci/build/wine-test/bin/wine" \
+            --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --tests artifacts \
+            --work "$PWD/ci/build/wine-work" \
+            --prefix "$PWD/ci/build/wine-prefix" \
+            --keep
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dll-test-logs
+          path: ci/build/wine-work/logs
+          if-no-files-found: ignore
