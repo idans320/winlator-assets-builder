@@ -16,11 +16,8 @@ name: ci
 # a Linux runner without the /system image (bionic, /system/bin/linker64).
 
 on:
-  pull_request:
-  push:
-    branches: [main]
-  schedule:
-    - cron: "0 4 * * *"
+  # Manual only: the jobs below still need fixing (fexcore patch drift, missing
+  # freetype/SDL2 in the builder image) before this can run automatically.
   workflow_dispatch:
     inputs:
       build_wine:
