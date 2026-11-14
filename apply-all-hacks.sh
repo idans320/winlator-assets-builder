@@ -1,10 +1,6 @@
 #!/bin/bash
-# Apply all optimizations to Mesa Turnip source:
-#   - Two-tier dirty-bit shadow register system (tu_cs_set_register + tu_cs_flush_dirty)
-#   - YOLO_SYNC hack (barrier stripping)
-#   - STATE_THROTTLE hack (skip PKT4 every N draws)
-#   - REG_BLAST hack (dump 64-reg blocks)
-#   - BARRIER_COALESCE opt-in via TU_BARRIER_COALESCE=1
+# Apply the two-tier dirty-bit register shadow to Mesa Turnip source
+# (tu_cs_set_register + tu_cs_flush_dirty).
 
 set -e
 cd /home/idans/winlator-cmod-builder/mesa/workdir/mesa
@@ -32,22 +28,12 @@ new_struct = '''   /* iova that this CS starts with in TU_CS_MODE_EXTERNAL */
    /* Two-tier dirty-bit shadow register state (gen8+).
     * tu_cs_set_register writes to shadow[] + marks dirty instantly.
     * tu_cs_flush_dirty emits only changed regs as compact PKT4 batches.
-    *
-    * Hack flags (env vars):
-    *   TU_YOLO_SYNC=1    — strip barriers, mega-flush at EndRenderPass
-    *   TU_SKIP_STATE=N   — flush dirty only every N draws (default 0=off)
-    *   TU_REG_BLAST=1    — dump 64-reg blocks, skip ffs scan
     */
    struct {
       uint32_t *shadow;       /* reg_offset>>2 -> value (5120 entries) */
       uint64_t  blocks[3];    /* Tier 1: one bit per block of 32 slots */
       uint32_t *regs;         /* Tier 2: one bit per exact slot */
       bool      enabled;
-      bool      yolo_sync;
-      bool      yolo_barrier_needed;
-      uint8_t   throttle_n;
-      uint8_t   throttle_counter;
-      bool      reg_blast;
    } dirty;
 
    /* state for cond_exec_start/cond_exec_end */'''
@@ -102,26 +88,6 @@ static inline void
 tu_cs_flush_dirty(struct tu_cs *cs)
 {
    if (!cs->dirty.enabled || !cs->dirty.shadow) return;
-   if (cs->dirty.throttle_n > 1) {
-      if (++cs->dirty.throttle_counter < cs->dirty.throttle_n) return;
-      cs->dirty.throttle_counter = 0;
-   }
-   if (cs->dirty.reg_blast) {
-      for (int t = 0; t < DIRTY_TIER1; t++) {
-         uint64_t blocks = cs->dirty.blocks[t];
-         if (!blocks) continue;
-         while (blocks) {
-            int b = __builtin_ffsll(blocks) - 1;
-            blocks &= ~(1ULL << b);
-            tu_cs_emit_pkt4(cs, (uint16_t)(((t << 6) + b) << 7), 32);
-            uint32_t *src = cs->dirty.shadow + ((t << 6) + b) * 32;
-            for (int i = 0; i < 32; i++) tu_cs_emit(cs, src[i]);
-         }
-         cs->dirty.blocks[t] = 0;
-      }
-      memset(cs->dirty.regs, 0, DIRTY_BLOCKS * sizeof(uint32_t));
-      return;
-   }
    for (int t = 0; t < DIRTY_TIER1; t++) {
       uint64_t blocks = cs->dirty.blocks[t];
       if (!blocks) continue;
@@ -143,16 +109,6 @@ tu_cs_flush_dirty(struct tu_cs *cs)
       }
       cs->dirty.blocks[t] = 0;
    }
-}
-
-static inline void
-tu_cs_flush_barrier_yolo(struct tu_cs *cs)
-{
-   if (!cs->dirty.yolo_sync || !cs->dirty.yolo_barrier_needed) return;
-   tu_cs_emit_pkt7(cs, CP_EVENT_WRITE, 4);
-   tu_cs_emit(cs, 0x1f); tu_cs_emit(cs, 0); tu_cs_emit(cs, 0); tu_cs_emit(cs, 0);
-   tu_cs_emit_wfi(cs);
-   cs->dirty.yolo_barrier_needed = false;
 }
 
 static inline void
@@ -195,11 +151,6 @@ new_init = '''   cs->device = device;
       cs->dirty.shadow = NULL;
       cs->dirty.regs = NULL;
       memset(cs->dirty.blocks, 0, sizeof(cs->dirty.blocks));
-      cs->dirty.yolo_sync = !!getenv("TU_YOLO_SYNC");
-      cs->dirty.yolo_barrier_needed = false;
-      cs->dirty.throttle_n = getenv("TU_SKIP_STATE") ? atoi(getenv("TU_SKIP_STATE")) : 0;
-      cs->dirty.throttle_counter = 0;
-      cs->dirty.reg_blast = !!getenv("TU_REG_BLAST");
    }
 }'''
 cs_cc = cs_cc.replace(old_init, new_init)
@@ -215,41 +166,6 @@ new_free = '''   free(cs->entries);
    free(cs->dirty.regs);
 }'''
 cs_cc = cs_cc.replace(old_free, new_free)
-
-# ============================================================
-# tu_cmd_buffer.cc: YOLO in tu_emit_cache_flush + renderpass variant
-# ============================================================
-old_f = '''   BITMASK_ENUM(tu_cmd_flush_bits) flushes = cache->flush_bits;
-   tu6_emit_flushes<CHIP>(cmd_buffer, cs, cache);'''
-new_f = '''   if (unlikely(cmd_buffer->cs.dirty.yolo_sync)) {
-      cmd_buffer->cs.dirty.yolo_barrier_needed = true;
-      return;
-   }
-   BITMASK_ENUM(tu_cmd_flush_bits) flushes = cache->flush_bits;
-   tu6_emit_flushes<CHIP>(cmd_buffer, cs, cache);'''
-cmdbuf = cmdbuf.replace(old_f,
-   '''   if (unlikely(cmd_buffer->cs.dirty.yolo_sync)) {
-      cmd_buffer->cs.dirty.yolo_barrier_needed = true;
-      return;
-   }
-   BITMASK_ENUM(tu_cmd_flush_bits) flushes = cache->flush_bits;
-   tu6_emit_flushes<CHIP>(cmd_buffer, cs, cache);''')
-
-old_rp = '''   if (!cmd_buffer->state.renderpass_cache.flush_bits &&
-        likely(!tu_env.debug))
-       return;
-
-   struct tu_cs *cs = &cmd_buffer->draw_cs;'''
-new_rp = '''   if (unlikely(cmd_buffer->draw_cs.dirty.yolo_sync)) {
-      cmd_buffer->draw_cs.dirty.yolo_barrier_needed = true;
-      return;
-   }
-   if (!cmd_buffer->state.renderpass_cache.flush_bits &&
-        likely(!tu_env.debug))
-       return;
-
-   struct tu_cs *cs = &cmd_buffer->draw_cs;'''
-cmdbuf = cmdbuf.replace(old_rp, new_rp)
 
 # ============================================================
 # Write files back
