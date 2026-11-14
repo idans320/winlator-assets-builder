@@ -11,6 +11,7 @@ PKG_NAME="mesa"
 
 MESA_REPO=$(yq ".${PKG_NAME}.repo" "$ROOT_DIR/packages.yml")
 MESA_BRANCH=$(yq ".${PKG_NAME}.branch" "$ROOT_DIR/packages.yml")
+MESA_COMMIT=$(yq ".${PKG_NAME}.commit // \"\"" "$ROOT_DIR/packages.yml")
 SDK_VER=$(yq ".${PKG_NAME}.sdk_ver" "$ROOT_DIR/packages.yml")
 NDK_CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 MESA_BUILD_TYPE="${MESA_BUILD_TYPE:-$(yq ".${PKG_NAME}.buildtype" "$ROOT_DIR/packages.yml")}"
@@ -30,18 +31,31 @@ if [ ! -d "$NDK_CLANG" ]; then
     exit 1
 fi
 
+# Build exactly the pinned commit when packages.yml names one, otherwise the
+# branch head. Either way the tree is refreshed: an existing checkout would
+# otherwise be reused forever, and reset --hard discards earlier patch commits.
+if [ -n "$MESA_COMMIT" ] && [ "$MESA_COMMIT" != "null" ]; then
+    MESA_REF="$MESA_COMMIT"
+else
+    MESA_REF="$MESA_BRANCH"
+fi
+
 mkdir -p "$WORKDIR"
 if [ ! -d "$WORKDIR/mesa" ]; then
     echo "Cloning Mesa (branch: $MESA_BRANCH)..."
     git clone --depth 1 --branch "$MESA_BRANCH" "$MESA_REPO" "$WORKDIR/mesa" 2>&1 ||
         { echo "Clone failed"; exit 1; }
-else
-    # Refresh: an existing checkout would otherwise be reused forever, and the
-    # branch moves. reset --hard also discards previously applied patch commits.
-    echo "Updating Mesa (branch: $MESA_BRANCH)..."
-    git -C "$WORKDIR/mesa" fetch --depth 1 origin "$MESA_BRANCH" > /dev/null 2>&1 &&
-    git -C "$WORKDIR/mesa" reset --hard -q FETCH_HEAD ||
-        { echo "Update failed"; exit 1; }
+fi
+
+echo "Checking out $MESA_REF..."
+git -C "$WORKDIR/mesa" fetch --depth 1 -q origin "$MESA_REF" &&
+git -C "$WORKDIR/mesa" reset --hard -q FETCH_HEAD ||
+    { echo "Cannot check out $MESA_REF"; exit 1; }
+
+MESA_HEAD=$(git -C "$WORKDIR/mesa" rev-parse HEAD)
+echo -e "${green}Mesa commit: $MESA_HEAD${nocolor}"
+if [ "$MESA_REF" = "$MESA_COMMIT" ] && [ "$MESA_HEAD" != "$MESA_COMMIT" ]; then
+    echo "Checked out $MESA_HEAD, expected pinned $MESA_COMMIT"; exit 1
 fi
 MESA_VERSION=$(cat "$WORKDIR/mesa/VERSION")
 echo -e "${green}Mesa version: $MESA_VERSION${nocolor}"
