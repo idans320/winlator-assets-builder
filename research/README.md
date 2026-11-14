@@ -130,11 +130,3 @@ export LD_PRELOAD=./output/libstub_gpu_client.so
 ./vulkan.turnip.so
 ```
 
-## Hack Flags (patched driver)
-
-| Flag | Effect |
-|------|--------|
-| `TU_YOLO_SYNC=1` | Strip per-draw barriers, mega-flush at EndRenderPass |
-| `TU_SKIP_STATE=N` | Flush dirty registers only every N draws |
-| `TU_REG_BLAST=1` | Dump 64-register blocks (skip ffs scan, brute-force) |
-| `TU_BARRIER_COALESCE=1` | Skip flush emission when no bits accumulated |
