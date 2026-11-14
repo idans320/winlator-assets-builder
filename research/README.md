@@ -57,10 +57,6 @@ research/
 │   ├── build-stub.sh           # Cross-compile for aarch64 (NDK)
 │   └── fuzz_vulkan_test.c      # Direct driver fuzz harness
 │
-├── patches/            # Mesa optimization patches
-│   ├── 0003-tu-cs-reg-cache.patch     # Two-tier dirty-bit shadow register system
-│   └── 0004-barrier-coalesce.patch    # Barrier coalescing (opt-in)
-│
 ├── output/             # Generated artifacts
 │   ├── analysis.json             # Full neuron call graph (20MB)
 │   ├── bottleneck_report.json    # Ranked FPS optimization targets
@@ -116,6 +112,9 @@ research/
 | Redundant write filter | 11.4% | 11.4% | 33.5% | 11.0% | 11.0% |
 | Barrier coalescing | 130 skip | 1600 skip | 230 skip | 1250 skip | 330 skip |
 | **Combined** | **~15%** | **~15%** | **~33%** | **~17%** | **~14%** |
+
+Device traces disagree: 309 -> 307 and 453 -> 448 PKT4 writes per capture
+(`output/diffs/`). Treat the table as model output, not a measurement.
 
 ## C Stub Integration
 
