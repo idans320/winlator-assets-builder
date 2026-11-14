@@ -132,7 +132,7 @@ index 5710d11..607c3a8 100644
     VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
 -   memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
 -          pPushConstantsInfo->pValues, pPushConstantsInfo->size);
-+   /* Push constants are at most MAX_PUSH_CONSTANTS_SIZE (128 bytes) and the
++   /* Push constants are at most MAX_PUSH_CONSTANTS_SIZE (256 bytes) and the
 +    * size is a multiple of 4, so a bounded word loop compiles to inline
 +    * ldp/stp without the libc memcpy call and its save/restore preamble.
 +    */

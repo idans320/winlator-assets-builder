@@ -33,7 +33,15 @@ fi
 mkdir -p "$WORKDIR"
 if [ ! -d "$WORKDIR/mesa" ]; then
     echo "Cloning Mesa (branch: $MESA_BRANCH)..."
-    git clone --depth 1 --branch "$MESA_BRANCH" "$MESA_REPO" "$WORKDIR/mesa" 2>&1
+    git clone --depth 1 --branch "$MESA_BRANCH" "$MESA_REPO" "$WORKDIR/mesa" 2>&1 ||
+        { echo "Clone failed"; exit 1; }
+else
+    # Refresh: an existing checkout would otherwise be reused forever, and the
+    # branch moves. reset --hard also discards previously applied patch commits.
+    echo "Updating Mesa (branch: $MESA_BRANCH)..."
+    git -C "$WORKDIR/mesa" fetch --depth 1 origin "$MESA_BRANCH" > /dev/null 2>&1 &&
+    git -C "$WORKDIR/mesa" reset --hard -q FETCH_HEAD ||
+        { echo "Update failed"; exit 1; }
 fi
 MESA_VERSION=$(cat "$WORKDIR/mesa/VERSION")
 echo -e "${green}Mesa version: $MESA_VERSION${nocolor}"
@@ -51,7 +59,8 @@ if [ -n "$MESA_LOCAL_PATCHES" ] && [ "$MESA_LOCAL_PATCHES" != "null" ]; then
             echo "  already applied"
             continue
         fi
-        echo "  Patch $(basename "$patch") failed — check $WORKDIR/mesa git status"
+        echo "  Patch $(basename "$patch") FAILED — check $WORKDIR/mesa git status"
+        exit 1
     done < <(find "$ROOT_DIR/$MESA_LOCAL_PATCHES" -maxdepth 1 -name "*.patch" -type f 2>/dev/null | sort)
 fi
 
