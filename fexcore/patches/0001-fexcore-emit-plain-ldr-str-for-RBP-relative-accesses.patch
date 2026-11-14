@@ -1,43 +1,26 @@
-From 31b90ff9fa20d4b9b5001c651b840a75c85897dc Mon Sep 17 00:00:00 2001
 From: builder <builder@winlator>
-Date: Wed, 11 Nov 2026 21:48:56 +0200
-Subject: [PATCH] fexcore: emit plain ldr/str for RBP-relative accesses
+Subject: [PATCH] fexcore: treat RBP as non-TSO like RSP
 
-FEX enforces x86 TSO on every DEFAULT memory access with ldar/stlr,
-except when the address is RSP-relative: the stack is thread-private, so
-no other thread can observe the ordering and the barrier is pure cost.
-Extend that to RBP, which addresses a frame on the same stack in
-frame-pointer code.
+FEX skips the TSO barrier for RSP-relative accesses because the stack is
+thread-private. Apply the same rule to RBP, which addresses a frame on that
+stack in frame-pointer code.
 
-This is a heuristic.  RBP is a general-purpose register, so a program
-that keeps a pointer to shared memory in RBP loses TSO ordering for
-memory reached through it.  The comment in IsNonTSOReg says so.
+Heuristic: RBP is a general-purpose register, so a pointer to shared memory
+kept in RBP loses TSO ordering.
 
-Removes the structural pattern cache that previously shipped in the same
-patch: it keyed cached ARM64 byte sequences on (IROp, Size, ElementSize)
-only, so every op with an immediate replayed the first-seen value, and
-its register patcher rewrote any 5-bit field that happened to match.
 ---
- FEXCore/Source/Interface/Core/OpcodeDispatcher.h | 12 +++++++++++-
- 1 file changed, 11 insertions(+), 1 deletion(-)
-
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-index 5b1aa59..3c78114 100644
+index 4477c72..75f03e9 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
 +++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
-@@ -1586,9 +1586,19 @@ private:
-     return !(Load && (Operand.IsLiteral() || Operand.IsLiteralRelocation())) && !Operand.IsGPR();
+@@ -1599,9 +1599,14 @@ private:
+     return !(Load && (Operand.IsLiteral() || Operand.IsLiteralRelocation() || Operand.IsLiteralPatchable())) && !Operand.IsGPR();
    }
  
-+  // RSP-relative accesses are thread-private stack memory: no other thread
-+  // can observe them, so the x86 TSO ordering FEX normally enforces with
-+  // ldar/stlr buys nothing and plain ldr/str is safe.
-+  //
-+  // RBP is treated the same way on the assumption that it addresses a frame
-+  // on that stack, which holds for the frame-pointer code most x86-64
-+  // binaries are built with.  It is an assumption, not a proof: RBP is a
-+  // general-purpose register, and a program holding a pointer to memory
-+  // shared with another thread in RBP loses TSO ordering for those accesses.
++  // RSP-relative accesses are thread-private stack memory, so the TSO barrier
++  // buys nothing. RBP addresses a frame on the same stack in frame-pointer
++  // code; treating it the same is a heuristic, since RBP can also hold a
++  // pointer to shared memory.
    [[nodiscard]]
    static bool IsNonTSOReg(MemoryAccessType Access, uint8_t Reg) {
 -    return Access == MemoryAccessType::DEFAULT && Reg == X86State::REG_RSP;
@@ -48,4 +31,3 @@ index 5b1aa59..3c78114 100644
    AddressMode DecodeAddress(const X86Tables::DecodedOp& Op, const X86Tables::DecodedOperand& Operand, MemoryAccessType AccessType, bool IsLoad);
 -- 
 2.55.0
-

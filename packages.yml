@@ -10,7 +10,7 @@ mesa:
 fexcore:
   description: FEXCore CPU emulation layer
   repo: https://github.com/FEX-Emu/FEX.git
-  branch: main
+  branch: FEX-2611.1
   output: fexcore-{version}.wcp
   mingw_ver: "20260519"
   preset: elitex
