@@ -115,31 +115,30 @@ if ! grep -q -- 'sincos_stub.o' "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.tx
         "$WORKDIR/fex/Source/Windows/WOW64/CMakeLists.txt"
 fi
 
-if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-    echo "Configuring CMake (aarch64-w64-mingw32)..."
-
-    cmake -B "$BUILD_DIR" -S "$WORKDIR/fex" -G Ninja \
-        -DCMAKE_SYSTEM_NAME="Windows" \
-        -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
-        -DCMAKE_CROSSCOMPILING=ON \
-        -DCMAKE_C_COMPILER="$CC" \
-        -DCMAKE_CXX_COMPILER="$CXX" \
-        -DCMAKE_AR="$AR" \
-        -DCMAKE_STRIP="$STRIP" \
-        -DCMAKE_RANLIB="$RANLIB" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_FLAGS="$ORYON_FLAGS" \
-        -DCMAKE_CXX_FLAGS="$ORYON_FLAGS" \
-        -DENABLE_LTO=OFF \
-         -DUSE_LINKER=lld \
-          -DBUILD_TESTING=OFF \
-          -DBUILD_FEXCONFIG=OFF \
-          -DTUNE_CPU=oryon-1 \
-          -DBUILD_THUNKS=OFF \
-         -DENABLE_ASSERTIONS=OFF \
-         -DENABLE_JEMALLOC_GLIBC_ALLOC=ON \
-        &> "$WORKDIR/cmake_log"
-fi
+# Always configure: the cache persists between builds, so a flag changed here
+# would otherwise be silently ignored by an existing build directory.
+echo "Configuring CMake (aarch64-w64-mingw32)..."
+cmake -B "$BUILD_DIR" -S "$WORKDIR/fex" -G Ninja \
+    -DCMAKE_SYSTEM_NAME="Windows" \
+    -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
+    -DCMAKE_CROSSCOMPILING=ON \
+    -DCMAKE_C_COMPILER="$CC" \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_AR="$AR" \
+    -DCMAKE_STRIP="$STRIP" \
+    -DCMAKE_RANLIB="$RANLIB" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS="$ORYON_FLAGS" \
+    -DCMAKE_CXX_FLAGS="$ORYON_FLAGS" \
+    -DENABLE_LTO=OFF \
+    -DUSE_LINKER=lld \
+    -DBUILD_TESTING=OFF \
+    -DBUILD_FEXCONFIG=OFF \
+    -DTUNE_CPU=oryon-1 \
+    -DBUILD_THUNKS=OFF \
+    -DENABLE_ASSERTIONS=OFF \
+    -DENABLE_JEMALLOC_GLIBC_ALLOC=ON \
+    &> "$WORKDIR/cmake_log"
 
 echo "Building..."
 set +e
@@ -169,7 +168,7 @@ cmake -B "$EC_BUILD_DIR" -S "$WORKDIR/fex" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$WORKDIR/fex/Data/CMake/toolchain_mingw.cmake" \
     -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
     -DCMAKE_BUILD_TYPE=Release \
-    -DENABLE_LTO=False -DTUNE_CPU=none \
+    -DENABLE_LTO=OFF -DTUNE_CPU=oryon-1 \
     -DBUILD_TESTING=False -DBUILD_FEXCONFIG=OFF -DBUILD_THUNKS=OFF \
     -DENABLE_ASSERTIONS=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
