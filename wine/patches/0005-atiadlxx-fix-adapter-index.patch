@@ -1,0 +1,16 @@
+--- a/dlls/atiadlxx/atiadlxx_main.c
++++ b/dlls/atiadlxx/atiadlxx_main.c
+@@ -559,9 +559,10 @@
+     {
+         for (j = 0; j < ctx->adapter_count; ++j)
+         {
+-            if (stricmp(ctx->adapters[i].gdi_device_name, dd.DeviceName)) continue;
+-            strcpy(ctx->adapters[i].gpu->device_string, dd.DeviceString);
+-            strcpy(ctx->adapters[i].driver_path, dd.DeviceKey);
++            if (stricmp(ctx->adapters[j].gdi_device_name, dd.DeviceName)) continue;
++            strcpy(ctx->adapters[j].gpu->device_string, dd.DeviceString);
++            strcpy(ctx->adapters[j].driver_path, dd.DeviceKey);
++            break;
+         }
+     }
+ 
