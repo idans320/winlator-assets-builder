@@ -8,3 +8,4 @@ mesa_debug_*.log
 tests/mesa/test_kgsl_sync
 tests/mesa/test_kgsl_sync_aarch64
 tests/mesa/libstub_kgsl*.so
+artifacts/
