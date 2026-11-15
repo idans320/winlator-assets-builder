@@ -1,0 +1,27 @@
+--- a/dlls/ntdll/exception.c
++++ b/dlls/ntdll/exception.c
+@@ -198,6 +198,24 @@
+ {
+     NTSTATUS status;
+     DWORD i;
++    ULONG_PTR here = (ULONG_PTR)&status;
++    ULONG_PTR limit = (ULONG_PTR)NtCurrentTeb()->Tib.StackLimit;
++    ULONG_PTR base = (ULONG_PTR)NtCurrentTeb()->Tib.StackBase;
++
++    /* A fault raised inside the dispatcher re-enters it with the same address,
++     * and the stack shrinks by one dispatch frame per level until the guard
++     * page: unbounded recursion that ends in a stack overflow instead of an
++     * error. Bound it by the stack margin, which is what actually gets
++     * consumed. A genuine stack overflow exception is exempt: it has no margin
++     * left by definition and must still be delivered. */
++    if (rec->ExceptionCode != STATUS_STACK_OVERFLOW && limit && here > limit &&
++        here - limit < 0x8000)
++    {
++        ERR( "exception dispatch nesting out of stack: code %lx addr %p, %I64x of %I64x "
++             "bytes of stack left\n", rec->ExceptionCode, rec->ExceptionAddress,
++             (ULONG64)(here - limit), (ULONG64)(base - limit) );
++        NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
++    }
+ 
+     if (need_backtrace(rec->ExceptionCode))
+     {

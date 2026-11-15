@@ -1,0 +1,16 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1403,6 +1403,13 @@
+ {
+     const UINT64 *map = (const UINT64 *)NtCurrentTeb()->Peb->EcCodeBitMap;
+     ULONG_PTR page = ptr / page_size;
++
++    /* Faulting in here is fatal: the dispatcher calls RtlIsEcCode for the
++     * faulting address, so a fault inside this function raises the same
++     * exception again and recurses until the stack is gone. Guard the map
++     * pointer and the index range. */
++    if (!map || ptr >= (ULONG_PTR)0x7fffffff0000) return FALSE;
++
+     return (map[page / 64] >> (page & 63)) & 1;
+ }
+ 
