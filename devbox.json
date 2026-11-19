@@ -31,13 +31,14 @@
     "perl",
     "libx11",
     "libxext",
-    "freetype"
+    "freetype",
+    "rustup@latest"
   ],
   "env": {
     "DEVBOX_ANDROID_HOME": ".devbox/nix/profile/default/libexec/android-sdk",
-    "DEVBOX_NDK": ".devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865",
-    "ANDROID_HOME": "$PWD/.devbox/nix/profile/default/libexec/android-sdk",
-    "NDK": "$PWD/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865"
+    "DEVBOX_NDK":          ".devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865",
+    "ANDROID_HOME":        "$PWD/.devbox/nix/profile/default/libexec/android-sdk",
+    "NDK":                 "$PWD/.devbox/nix/profile/default/libexec/android-sdk/ndk/29.0.14206865"
   },
   "shell": {
     "init_hook": [

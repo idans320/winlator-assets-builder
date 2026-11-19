@@ -26,6 +26,9 @@ setup_env() {
     SDK_VER=$(yq ".${PKG_NAME}.sdk_ver" "$ROOT_DIR/packages.yml")
     PRESET=$(yq ".${PKG_NAME}.preset" "$ROOT_DIR/packages.yml")
 
+    NTSYNC_REPO=$(yq ".${PKG_NAME}.ntsync_android.repo" "$ROOT_DIR/packages.yml")
+    NTSYNC_COMMIT=$(yq ".${PKG_NAME}.ntsync_android.commit" "$ROOT_DIR/packages.yml")
+
     REMOTE_PATCH_DIR=""
     PKG_REMOTE_PATCHES=$(yq ".${PKG_NAME}.remotePatches" "$ROOT_DIR/packages.yml")
     if [ -n "$PKG_REMOTE_PATCHES" ] && [ "$PKG_REMOTE_PATCHES" != "null" ]; then
@@ -158,7 +161,10 @@ setup_compiler_flags() {
         fi
         export FONTCONFIG_LIBS="-L$DEPS/lib -lfontconfig -lfreetype -lexpat"
         export X_CFLAGS="-I$DEPS/include"
-        export X_LIBS="-lX11 -lXext -landroid-sysvshm"
+        # Xfixes/Xrender/Xrandr are present in the termux deps and proton_11.0-2's
+        # winex11 patches use XFixes (cursor warps); the rest stay undetected
+        # because the deps ship no libXinerama/libXcomposite.
+        export X_LIBS="-lX11 -lXext -lXfixes -lXrender -lXrandr -landroid-sysvshm"
         export GSTREAMER_CFLAGS="-I$DEPS/include/gstreamer-1.0 -I$DEPS/include/glib-2.0 -I$DEPS/lib/glib-2.0/include -I$DEPS/glib-2.0/include -I$DEPS/lib/gstreamer-1.0/include"
         export GSTREAMER_LIBS="-L$DEPS/lib -lgstgl-1.0 -lgstapp-1.0 -lgstvideo-1.0 -lgstaudio-1.0 -lglib-2.0 -lgobject-2.0 -lgio-2.0 -lgsttag-1.0 -lgstbase-1.0 -lgstreamer-1.0"
     else
@@ -212,12 +218,16 @@ setup_deps() {
     TERMUX_ROOT="$WORKDIR/termux-rootfs"
     TERMUX_PREFIX="$TERMUX_ROOT/data/data/com.termux/files/usr"
     TERMUX_REPO="https://packages.termux.dev/apt/termux-main"
+    # SDL2 lives in the x11 repo, not main; winebus needs it for gamepads.
+    TERMUX_REPO_X11="https://packages.termux.dev/apt/termux-x11"
     TERMUX_ARCH="aarch64"
     DEB_CACHE="$WORKDIR/deb-cache"
 
     if [ -f "$TERMUX_PREFIX/.deps-ready" ]; then
         info "Termux deps already installed at $TERMUX_PREFIX"
-        export DEPS="$TERMUX_PREFIX"
+        DEPS="$TERMUX_PREFIX"
+        [ -f "$DEPS/lib/libSDL2.so" ] && export SDL2_PREFIX="$DEPS"
+        export DEPS
         return
     fi
 
@@ -226,6 +236,8 @@ setup_deps() {
 
     PKGS_INDEX="$DEB_CACHE/Packages"
     [ ! -f "$PKGS_INDEX" ] && curl -sL "$TERMUX_REPO/dists/stable/main/binary-$TERMUX_ARCH/Packages" -o "$PKGS_INDEX"
+    PKGS_X11="$DEB_CACHE/Packages.x11"
+    [ ! -f "$PKGS_X11" ] && curl -sL "$TERMUX_REPO_X11/dists/x11/main/binary-$TERMUX_ARCH/Packages" -o "$PKGS_X11"
 
     download_pkg() {
         local pkg="$1"
@@ -234,11 +246,15 @@ setup_deps() {
             echo "  $pkg (cached)"
             return
         fi
-        local url
+        local url repo="$TERMUX_REPO"
         url=$(grep -A20 "^Package: $pkg\$" "$PKGS_INDEX" | grep "^Filename:" | head -1 | awk '{print $2}')
+        if [ -z "$url" ] && [ -f "$PKGS_X11" ]; then
+            url=$(grep -A20 "^Package: $pkg\$" "$PKGS_X11" | grep "^Filename:" | head -1 | awk '{print $2}')
+            [ -n "$url" ] && repo="$TERMUX_REPO_X11"
+        fi
         if [ -n "$url" ]; then
             echo "  $pkg ..."
-            curl -sL "$TERMUX_REPO/$url" -o "$deb"
+            curl -sL "$repo/$url" -o "$deb"
         else echo "  $pkg (not found)"; fi
     }
 
@@ -259,6 +275,7 @@ setup_deps() {
         alsa-lib pulseaudio gnutls libgnutls libgmp libnettle libidn2 libunistring
         glib gstreamer gst-plugins-base gst-plugins-bad libffi zlib libpng
         libglvnd
+        sdl2
     )
 
     for pkg in "${TERMUX_PACKAGES[@]}"; do download_pkg "$pkg"; done
@@ -272,6 +289,7 @@ setup_deps() {
     done
 
     touch "$TERMUX_PREFIX/.deps-ready"
+    [ -f "$TERMUX_PREFIX/lib/libSDL2.so" ] && export SDL2_PREFIX="$TERMUX_PREFIX"
     export DEPS="$TERMUX_PREFIX"
     info "Termux deps bootstrap complete"
     info "DEPS=$DEPS"
@@ -281,14 +299,131 @@ setup_deps() {
 clone_wine() {
     [ "$DO_CLONE" -ne 1 ] && return
     mkdir -p "$WORKDIR"
+    local marker="$WORKDIR/wine.source" clean=0 origin
+    if [ -d "$WORKDIR/wine/.git" ]; then
+        origin=$(git -C "$WORKDIR/wine" remote get-url origin 2>/dev/null || echo "?")
+        if [ "$origin" != "$WINE_REPO" ]; then
+            warn "workdir holds $origin, wanted $WINE_REPO"; clean=1
+        elif ! git -C "$WORKDIR/wine" rev-parse --verify --quiet "$WINE_BRANCH^{commit}" > /dev/null; then
+            warn "workdir has no ref $WINE_BRANCH"; clean=1
+        elif [ "$(git -C "$WORKDIR/wine" rev-parse HEAD)" != "$(git -C "$WORKDIR/wine" rev-parse "$WINE_BRANCH^{commit}")" ]; then
+            warn "workdir is not at $WINE_BRANCH"; clean=1
+        fi
+    fi
+    if [ -f "$marker" ] && [ "$(cat "$marker")" != "$WINE_REPO $WINE_BRANCH" ]; then
+        warn "source changed ($(cat "$marker") -> $WINE_REPO $WINE_BRANCH)"; clean=1
+    fi
+    if [ "$clean" = "1" ]; then
+        warn "starting from a clean tree"
+        rm -rf "$WORKDIR/wine" "$marker"
+    fi
     if [ -d "$WORKDIR/wine" ]; then
         warn "Wine source already exists, skipping clone"
     else
         echo "Cloning Valve wine (branch: $WINE_BRANCH)..."
         git clone --depth 1 --branch "$WINE_BRANCH" "$WINE_REPO" "$WORKDIR/wine"
+        printf '%s' "$WINE_REPO $WINE_BRANCH" > "$marker"
     fi
     WINE_VERSION=$(cd "$WORKDIR/wine" && git rev-parse --short HEAD)
     info "Wine version: $WINE_VERSION"
+}
+
+# ── ntsync (userspace sync for Android) ──────────────────────
+build_ntsync_android() {
+    [ "$DO_SYSVSHM" -ne 1 ] && return
+    [ -n "$DEPS" ] || { warn "DEPS not set, skipping ntsync"; return; }
+    [ -n "$NTSYNC_REPO" ] && [ "$NTSYNC_REPO" != "null" ] || { warn "no ntsync pin in packages.yml"; return; }
+
+    local dir="$WORKDIR/ntsync-android"
+    if [ ! -d "$dir/.git" ]; then
+        info "Fetching ntsync-android ($NTSYNC_COMMIT)..."
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        git -C "$dir" init -q
+        git -C "$dir" remote add origin "$NTSYNC_REPO"
+        git -C "$dir" fetch -q --depth 1 origin "$NTSYNC_COMMIT"
+        git -C "$dir" checkout -q FETCH_HEAD
+    fi
+
+    local clang="${NDK_BIN}/${TARGET}-clang" ndk_ar="${NDK_BIN}/llvm-ar"
+    [ -x "$clang" ] || clang="$CC"
+    [ -x "$ndk_ar" ] || ndk_ar="$AR"
+    [ -x "$clang" ] || die "no NDK clang for the ntsync build"
+
+    info "Building libntsync_android.a with $clang..."
+    (
+        cd "$dir"
+        CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$clang" \
+        AR="$ndk_ar" \
+        cargo build --release --target aarch64-linux-android 2>&1 | tee "$WORKDIR/ntsync_build_log"
+    ) || die "ntsync-android build failed - check $WORKDIR/ntsync_build_log"
+
+    local lib="$dir/target/aarch64-linux-android/release/libntsync_android.a"
+    [ -f "$lib" ] || die "libntsync_android.a not produced"
+    mkdir -p "$DEPS/lib"
+    cp "$lib" "$DEPS/lib/"
+    # ntdll/wineserver link the archive statically; make has no dependency edge,
+    # so drop stale objects to force a relink.
+    rm -f "$WORKDIR/wine/dlls/ntdll/ntdll.so" "$WORKDIR/wine/server/wineserver" 2> /dev/null
+    info "libntsync_android.a installed"
+}
+
+# ── android patch set ────────────────────────────────────────
+# proton_11.0-2 organises its Android fixes as android/patches/{tools,common,arm64ec}
+# and applies them in a curated order from build-scripts/build-step-arm64ec.sh.
+# The order matters (later patches touch files earlier ones create), so the list
+# is read out of their script rather than globbed.
+#
+# libntsync_android needs a Rust cross-toolchain that this repo does not carry
+# yet, so those patches are skipped by default: the build keeps fsync.
+WINE_PATCH_SKIP="${WINE_PATCH_SKIP:-}"
+
+apply_android_patches() {
+    local pdir="$WORKDIR/wine/android/patches"
+    local step="$WORKDIR/wine/build-scripts/build-step-arm64ec.sh"
+
+    [ -d "$pdir" ] || return 0
+
+    # Flat layout (proton_11.0): the older remote/local patch steps handle it.
+    if ls "$pdir"/*.patch > /dev/null 2>&1; then
+        return 0
+    fi
+
+    [ -f "$step" ] || die "no curated patch list at $step"
+
+    if [ -n "$(git -C "$WORKDIR/wine" status --porcelain 2> /dev/null)" ]; then
+        warn "source tree is dirty, resetting before patching"
+        git -C "$WORKDIR/wine" reset -q --hard
+        git -C "$WORKDIR/wine" clean -qfd
+    fi
+
+    info "Applying android patch set..."
+
+    local p applied=0 skipped=0
+    # tools/ patches rebuild winebuild/winegcc, so they go in before wine-tools.
+    for p in "$pdir"/tools/*.patch; do
+        [ -f "$p" ] || continue
+        if git -C "$WORKDIR/wine" apply --check "$p" 2> /dev/null; then
+            git -C "$WORKDIR/wine" apply "$p" || die "tools patch failed: $(basename "$p")"
+            applied=$((applied + 1))
+        fi
+    done
+
+    while IFS= read -r p; do
+        case " $WINE_PATCH_SKIP " in
+            *" $p "*) warn "  skip: $p"; skipped=$((skipped + 1)); continue ;;
+        esac
+        if git -C "$WORKDIR/wine" apply --check "$pdir/$p" 2> /dev/null; then
+            git -C "$WORKDIR/wine" apply "$pdir/$p" || die "patch failed: $p"
+            applied=$((applied + 1))
+        elif git -C "$WORKDIR/wine" apply --reverse --check "$pdir/$p" 2> /dev/null; then
+            info "  already applied: $p"
+        else
+            die "patch does not apply: $p"
+        fi
+    done < <(sed -n '/PATCHES=(/,/^    )/p' "$step" | sed 's/#.*//' | grep -oE '"[^"]+\.patch"' | tr -d '"')
+
+    info "android patches: $applied applied, $skipped skipped"
 }
 
 # ── sysvshm ───────────────────────────────────────────────────
@@ -386,9 +521,10 @@ build_native_tools() {
             --without-opencl --without-oss --without-pcap --without-sdl --without-usb \
             --without-v4l2 --without-pcsclite --without-ffmpeg --without-pthread \
             2>&1 | tee "$WORKDIR/tools_configure_log"
-        make tools tools/winebuild/winebuild tools/winegcc/winegcc \
-            tools/wrc/wrc tools/widl/widl tools/wmc/wmc \
-            tools/wine/wine tools/sfnt2fon/sfnt2fon tools/make_xftmpl \
+        # __tooldeps__ is the aggregate target upstream builds for wine-tools;
+        # a hand-maintained list goes stale (proton_11.0-2 needs wineg++
+        # for lsteamclient, which the old list did not build).
+        make -j"$(nproc)" __tooldeps__ \
             2>&1 | tee "$WORKDIR/tools_build_log"
     )
     info "Native tools build complete"
@@ -399,6 +535,11 @@ configure_wine() {
     [ "$DO_CONFIGURE" -ne 1 ] && return
     [ ! -d "$WORKDIR/wine" ] && die "Wine source not found. Run --clone first."
     cd "$WORKDIR/wine"
+
+    # config.cache keeps stale feature answers across dependency changes (a
+    # cached "no" for Xfixes blocks the winex11 patches even after X_LIBS is
+    # fixed), so always start configure cold.
+    rm -f config.cache
 
     WINE_TOOLS_OPT=""
     if [ "$IS_AARCH64" -eq 0 ] && [ -d "$WORKDIR/wine-tools" ]; then
@@ -429,7 +570,7 @@ configure_wine() {
         --without-piper --with-pthread --with-pulse --without-sane \
         ${SDL_OPT} --without-udev --without-unwind --without-usb \
         --without-v4l2 --without-vosk --with-vulkan --without-wayland \
-        --without-xcomposite --without-xfixes --without-xinerama \
+        --without-xcomposite --with-xfixes --without-xinerama \
         --without-xrandr --without-xrender --without-xshape --with-xshm \
         --without-xxf86vm \
         2>&1 | tee "$WORKDIR/configure_log"
@@ -469,6 +610,14 @@ apply_patches() {
             apply_patch_file "$patch_file" || true
             patch_count=$((patch_count + 1))
         done
+        # Subdirectory layout (proton_11.0-2) is handled by apply_android_patches.
+        if [ "$patch_count" -eq 0 ]; then
+            for d in "$REMOTE_PATCH_DIR"/*/; do
+                [ -d "$d" ] || continue
+                info "  curated patch set already applied (see apply_android_patches)"
+                break
+            done
+        fi
         echo "  ($patch_count remote patches)"
     fi
 
@@ -509,6 +658,8 @@ build_wine() {
 
     echo "  -> make depend..."
     make depend 2>&1 | tee -a "$WORKDIR/build_log"
+    DEPEND_RC=${PIPESTATUS[0]}
+    [ "$DEPEND_RC" -eq 0 ] || die "make depend FAILED (exit $DEPEND_RC) - check $WORKDIR/build_log"
 
     echo "  -> make all..."
     make -j"$WINE_JOBS" 2>&1 | tee -a "$WORKDIR/build_log"
@@ -641,7 +792,7 @@ package_wine() {
 
     WINE_VERSION=$(git rev-parse --short HEAD)
     # Profile revision for side-by-side testing; override with WINE_REV=...
-    WINE_REV="${WINE_REV:-16}"
+    WINE_REV="${WINE_REV:-9}"
     PKGDIR="$WORKDIR/package"
     rm -rf "$PKGDIR"
     mkdir -p "$PKGDIR/bin"
@@ -674,6 +825,11 @@ package_wine() {
             done
         done
     done
+
+    local packaged
+    packaged=$(find "$PKGDIR/lib/wine" -path '*-windows/*' \( -name '*.dll' -o -name '*.drv' -o -name '*.exe' \) 2> /dev/null | wc -l)
+    [ "$packaged" -gt 100 ] || die "Refusing to package: PE payload is empty ($packaged files) - make failed?"
+    info "PE DLLs packaged: $packaged"
 
     # program symlinks in bin/
     for pe_arch in aarch64 i386; do
@@ -796,7 +952,7 @@ package_wine() {
   "type": "Wine",
   "versionName": "11-arm64ec",
   "versionCode": $WINE_REV,
-  "description": "Wine 11 Proton ARM64EC (ESYNC/FSYNC, Oryon optimized)",
+  "description": "Wine 11 Proton ARM64EC (Proton 11.0-2, ntsync/fsync, Oryon optimized)",
   "files": [],
   "wine": { "binPath": "bin", "libPath": "lib", "prefixPack": "prefixPack.txz" }
 }
@@ -895,7 +1051,9 @@ setup_toolchain
 apply_16kb_pages
 setup_deps
 clone_wine
+apply_android_patches
 build_sysvshm
+build_ntsync_android
 setup_compiler_flags
 generate_sources
 build_native_tools

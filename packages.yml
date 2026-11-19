@@ -18,15 +18,25 @@ fexcore:
   localPatches: fexcore/patches
 
 wine:
-  description: Wine 11 Proton ARM64 + ARM64EC
+  description: Wine 11 Proton ARM64 + ARM64EC (Proton 11.0-2)
   repo: https://github.com/GameNative/proton-wine.git
-  branch: proton_11.0
+  # proton_11.0-2 carries the current ARM64EC work. It moved the Android fixes
+  # into android/patches/{tools,common,arm64ec}/ with a curated order (applied by
+  # apply_android_patches), and replaced esync with userspace ntsync. The ntsync
+  # patches are skipped until a Rust cross-toolchain is added, so this builds
+  # with fsync.
+  branch: proton-11.0-2-20261115
   output: wine-arm64-{version}.wcp
   mingw_ver: "20260519"
   sdk_ver: 28
   preset: elitex
   remotePatches: android/patches
   localPatches: wine/patches
+  # Userspace ntsync for Android (Rust). proton_11.0-2 links this into ntdll and
+  # wineserver; without it the build has no fast synchronisation path.
+  ntsync_android:
+    repo: https://github.com/joshuatam/ntsync-android.git
+    commit: 56447e0e837c226c46035c493acabe189ceea0c7
 
 box64:
   description: Box64 x86_64 emulator for ARM64

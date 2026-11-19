@@ -145,6 +145,10 @@
       "resolved": "github:NixOS/nixpkgs/4100e830e085863741bc69b156ec4ccd53ab5be0?narHash=sha256-NOF9NAREhxr50bbBfVcVOq%2BArCMSoe8dP79Pk2uyARk%3D#gnumake",
       "source": "nixpkg"
     },
+    "jdk17": {
+      "resolved": "github:NixOS/nixpkgs/4100e830e085863741bc69b156ec4ccd53ab5be0?narHash=sha256-NOF9NAREhxr50bbBfVcVOq%2BArCMSoe8dP79Pk2uyARk%3D#jdk17",
+      "source": "nixpkg"
+    },
     "libarchive": {
       "resolved": "github:NixOS/nixpkgs/4100e830e085863741bc69b156ec4ccd53ab5be0?narHash=sha256-NOF9NAREhxr50bbBfVcVOq%2BArCMSoe8dP79Pk2uyARk%3D#libarchive",
       "source": "nixpkg"
@@ -201,6 +205,45 @@
     "python3Packages.pyyaml": {
       "resolved": "github:NixOS/nixpkgs/4100e830e085863741bc69b156ec4ccd53ab5be0?narHash=sha256-NOF9NAREhxr50bbBfVcVOq%2BArCMSoe8dP79Pk2uyARk%3D#python3Packages.pyyaml",
       "source": "nixpkg"
+    },
+    "rustup@latest": {
+      "last_modified": "2026-10-02T22:55:44Z",
+      "plugin_version": "0.0.1",
+      "resolved": "github:NixOS/nixpkgs/55ba7f49ef2962b42cbd126522b7df5f95037679#rustup",
+      "source": "devbox-search",
+      "version": "1.29.1",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/apvdnyx3si9li3dms2igganafx0gz4d8-rustup-1.29.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/apvdnyx3si9li3dms2igganafx0gz4d8-rustup-1.29.1"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/zhwwzhmgxyr5xkglzi8y50hbvfwys251-rustup-1.29.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/zhwwzhmgxyr5xkglzi8y50hbvfwys251-rustup-1.29.1"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/s5g2mz2zr526hfvzf7si9ghsd221nn6z-rustup-1.29.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/s5g2mz2zr526hfvzf7si9ghsd221nn6z-rustup-1.29.1"
+        }
+      }
     },
     "xz": {
       "resolved": "github:NixOS/nixpkgs/4100e830e085863741bc69b156ec4ccd53ab5be0?narHash=sha256-NOF9NAREhxr50bbBfVcVOq%2BArCMSoe8dP79Pk2uyARk%3D#xz",
