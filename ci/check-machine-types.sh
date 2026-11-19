@@ -24,7 +24,7 @@
 #   --fexcore PATH   .wcp/.zip or an extracted directory
 #                    (default: newest fexcore-*.wcp in the repo root)
 #   --dxvk PATH      .wcp/.zip or an extracted directory
-#                    (default: newest dxvk-*.wcp, then *-arm64ec-gplasync.wcp)
+#                    (default: newest dxvk-*.wcp, then *-arm64ec*.wcp)
 #   --wine PATH      .wcp/.zip or an extracted directory (optional)
 #   --tests DIR      directory holding load_dlls_*.exe (optional)
 #   --strict-missing fail when no artifact at all was found (guards a mistyped
@@ -280,6 +280,9 @@ check_tree() {
 
 [ -n "$FEXCORE" ] || FEXCORE="$(newest_artifact "$ROOT_DIR/fexcore-*.wcp")"
 [ -n "$DXVK" ] || DXVK="$(newest_artifact "$ROOT_DIR/dxvk-*.wcp")"
+if [ -z "$DXVK" ]; then
+    DXVK="$(newest_artifact "$ROOT_DIR/*-arm64ec.wcp")"
+fi
 if [ -z "$DXVK" ]; then
     DXVK="$(newest_artifact "$ROOT_DIR/*-arm64ec-gplasync.wcp")"
 fi

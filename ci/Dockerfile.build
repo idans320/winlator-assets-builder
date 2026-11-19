@@ -130,6 +130,21 @@ RUN mkdir -p "${ARM64EC_MINGW_ROOT}" \
     && printf '%s\n' "$ARM64EC_LLVM_MINGW_VERSION" > "${ARM64EC_MINGW_ROOT}/.ci-version" \
     && test -x "${ARM64EC_MINGW_ROOT}/bin/arm64ec-w64-mingw32-clang"
 
+
+# Rust: proton_11.0-2 links a userspace ntsync library (github.com/joshuatam/
+# ntsync-android) into ntdll and wineserver, so the wine build needs a Rust
+# cross-toolchain with the Android target. Pinned so the image is reproducible.
+ARG RUST_VERSION=1.100.0
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+        --default-toolchain "${RUST_VERSION}" --profile minimal \
+    && "${CARGO_HOME}/bin/rustup" target add aarch64-linux-android \
+    && "${CARGO_HOME}/bin/rustc" --version \
+    # the wine job runs as the CI uid, so cargo needs to write its registry
+    && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
+ENV PATH=${CARGO_HOME}/bin:${PATH}
+
 # Upstream llvm-mingw first (matches packages.yml mingw_ver for the aarch64 and
 # i686 PE builds); the ARM64EC toolchain second so `arm64ec-w64-mingw32-*` and
 # `llvm-dlltool` resolve. FEX's ARM64EC build rewrites its dlltool call to a
@@ -142,6 +157,8 @@ RUN printf 'builder image ready\n' \
     && meson --version \
     && "${ARM64EC_MINGW_ROOT}/bin/arm64ec-w64-mingw32-clang" --version | head -1 \
     && test -x "${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+    && cargo --version \
+    && rustup target list --installed | grep -qx aarch64-linux-android \
     && echo "NDK: ${NDK}"
 
 WORKDIR /src

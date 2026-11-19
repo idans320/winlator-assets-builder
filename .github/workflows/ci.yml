@@ -131,7 +131,7 @@ jobs:
           name: dxvk-package
           path: |
             dxvk-*.wcp
-            *-arm64ec-gplasync.wcp
+            *-arm64ec.wcp
           if-no-files-found: error
 
       - name: Upload PE test programs
@@ -181,7 +181,7 @@ jobs:
           fi
           ci/check-machine-types.sh \
             --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
-            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/*-arm64ec.wcp | head -1)" \
             --tests artifacts \
             "${WINE_ARG[@]}"
 
@@ -229,11 +229,9 @@ jobs:
       - name: Refresh cached wine checkout
         run: |
           set -euo pipefail
-          if [ -d wine/workdir/wine/.git ]; then
-            branch="$(git -C wine/workdir/wine branch --show-current)"
-            git -C wine/workdir/wine fetch --depth 1 origin "$branch"
-            git -C wine/workdir/wine reset --hard FETCH_HEAD
-          fi
+          # wine/build.sh pins a tag (detached HEAD), so refreshing "the current
+          # branch" does not apply; it re-clones on its own when the pin moves.
+          echo "wine source pin: $(grep -A2 '^wine:' packages.yml | grep 'branch:' | awk '{print $2}')"
 
       - name: Build wine package
         run: |
@@ -249,6 +247,19 @@ jobs:
           ci/check-machine-types.sh \
             --wine "$(ls wine-arm64-*.wcp | head -1)" \
             --strict-missing
+
+      - name: Runtime loader gate (wine)
+        run: |
+          set -euo pipefail
+          # The app's LD_LIBRARY_PATH is only <imagefs>/usr/lib:/system/lib64,
+          # so a unixlib that links anything else cannot load on the device.
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            "$BUILDER_IMAGE" bash -lc '
+              ./ci/check-runtime-deps.sh \
+                --package "$(ls wine-arm64-*.wcp | head -1)" \
+                --require-udev'
 
       - name: Bundle Termux rootfs for the Android job
         run: |
@@ -446,7 +457,7 @@ jobs:
             --termux-rootfs artifacts/termux-rootfs \
             --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
             --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
-            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/*-arm64ec.wcp | head -1)" \
             --tests artifacts
 
       - name: Run DLL tests in the rootfs
@@ -520,7 +531,7 @@ jobs:
               --serial emulator-5554 \
               --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
               --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
-              --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+              --dxvk "$(ls artifacts/*-arm64ec.wcp | head -1)" \
               --tests artifacts \
               --termux-rootfs artifacts/termux-rootfs \
               --log-dir "$PWD/ci-logs/android"
@@ -565,7 +576,7 @@ jobs:
           ci/android-run-tests.sh --local \
             --wine "$(ls artifacts/wine-arm64-*.wcp | head -1)" \
             --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
-            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/*-arm64ec.wcp | head -1)" \
             --tests artifacts \
             "${termux_rootfs_args[@]}" \
             --log-dir "$PWD/ci-logs/android-local"
@@ -635,7 +646,7 @@ jobs:
           ci/run-wine-tests.sh \
             --wine "$PWD/ci/build/wine-test/bin/wine" \
             --fexcore "$(ls artifacts/fexcore-*.wcp | head -1)" \
-            --dxvk "$(ls artifacts/dxvk-*.wcp | head -1)" \
+            --dxvk "$(ls artifacts/*-arm64ec.wcp | head -1)" \
             --tests artifacts \
             --work "$PWD/ci/build/wine-work" \
             --prefix "$PWD/ci/build/wine-prefix" \
