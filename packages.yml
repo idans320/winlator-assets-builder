@@ -36,13 +36,12 @@ box64:
   sdk_ver: 35
 
 dxvk:
-  description: DXVK GPLAsync-LowLatency — D3D8/9/10/11 Vulkan translation layer
-  repo: https://github.com/Digger1955/dxvk-gplall.git
-  branch: GPLALL-master-2.6.8
-  output: "{version}-arm64ec-gplasync.wcp"
+  description: DXVK 3.x upstream (dxbc-spirv) — D3D8/9/10/11 Vulkan translation layer
+  repo: https://github.com/doitsujin/dxvk.git
+  branch: v3.1.1
+  output: "{version}-arm64ec.wcp"
   mingw_ver: "20260519"
   preset: elitex
-  localPatches: dxvk/patches
 
 benchmark:
   description: Vulkan GPU benchmark for Turnip driver optimization tracking

@@ -15,7 +15,7 @@ LLVM_MINGW_VER=$(yq ".${PKG_NAME}.mingw_ver" "$ROOT_DIR/packages.yml")
 HOST_ARCH="$(uname -m)"
 LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/llvm-mingw-${LLVM_MINGW_VER}-ucrt-ubuntu-22.04-${HOST_ARCH}.tar.xz"
 
-echo -e "${green}=== DXVK GPLAsync-LowLatency Builder (aarch64 + i686 PE) ===${nocolor}"
+echo -e "${green}=== DXVK 3.x Builder (aarch64 + arm64ec + i686 PE) ===${nocolor}"
 
 # --- Toolchain setup ---
 TOOLCHAIN_DIR="$WORKDIR/toolchain"
@@ -56,10 +56,49 @@ echo "CC  = $($CC --version 2>/dev/null | head -1 || echo aarch64-w64-mingw32-cl
 
 # --- Clone DXVK ---
 mkdir -p "$WORKDIR"
-if [ ! -d "$WORKDIR/dxvk" ]; then
-    echo "Cloning DXVK GPLAsync-LowLatency (branch: $DXVK_BRANCH)..."
-    git clone --recurse-submodules --depth 1 --branch "$DXVK_BRANCH" "$DXVK_REPO" "$WORKDIR/dxvk" 2>&1
+SOURCE_MARKER="$WORKDIR/dxvk.source"
+CLEAN_TREE=0
+
+if [ -d "$WORKDIR/dxvk/.git" ]; then
+    current_origin=$(git -C "$WORKDIR/dxvk" remote get-url origin 2>/dev/null || echo "?")
+    if [ "$current_origin" != "$DXVK_REPO" ]; then
+        echo "workdir holds $current_origin, wanted $DXVK_REPO"
+        CLEAN_TREE=1
+    elif ! git -C "$WORKDIR/dxvk" rev-parse --verify --quiet "$DXVK_BRANCH^{commit}" > /dev/null; then
+        echo "workdir has no ref $DXVK_BRANCH"
+        CLEAN_TREE=1
+    elif [ "$(git -C "$WORKDIR/dxvk" rev-parse HEAD)" != "$(git -C "$WORKDIR/dxvk" rev-parse "$DXVK_BRANCH^{commit}")" ]; then
+        echo "workdir is not at $DXVK_BRANCH"
+        CLEAN_TREE=1
+    fi
 fi
+
+if [ -f "$SOURCE_MARKER" ] && [ "$(cat "$SOURCE_MARKER")" != "$DXVK_REPO $DXVK_BRANCH" ]; then
+    echo "source changed ($(cat "$SOURCE_MARKER") -> $DXVK_REPO $DXVK_BRANCH)"
+    CLEAN_TREE=1
+fi
+
+if [ "$CLEAN_TREE" = "1" ]; then
+    echo "starting from a clean tree"
+    rm -rf "$WORKDIR/dxvk" "$WORKDIR/build" "$WORKDIR/build-arm64ec" "$WORKDIR/build-i686" \
+           "$WORKDIR/install" "$WORKDIR/install-arm64ec" "$WORKDIR/install-i686" "$SOURCE_MARKER"
+fi
+
+if [ ! -d "$WORKDIR/dxvk" ]; then
+    echo "Cloning $DXVK_REPO (branch: $DXVK_BRANCH)..."
+    git clone --depth 1 --branch "$DXVK_BRANCH" "$DXVK_REPO" "$WORKDIR/dxvk"
+    printf '%s' "$DXVK_REPO $DXVK_BRANCH" > "$SOURCE_MARKER"
+fi
+
+# 3.x moved the shader compiler to subprojects/dxbc-spirv, which carries its own
+# SPIRV-Headers submodule. A plain recursive clone does not reach that one.
+echo "Updating submodules..."
+git -C "$WORKDIR/dxvk" submodule update --init --depth 1
+for sub in "$WORKDIR/dxvk"/subprojects/*/; do
+    if [ -f "$sub/.gitmodules" ]; then
+        git -C "$sub" submodule update --init --depth 1
+    fi
+done
 
 DXVK_LOCAL_PATCHES=$(yq ".${PKG_NAME}.localPatches // \"\"" "$ROOT_DIR/packages.yml")
 if [ -n "$DXVK_LOCAL_PATCHES" ] && [ "$DXVK_LOCAL_PATCHES" != "null" ]; then
@@ -78,7 +117,7 @@ if [ -n "$DXVK_LOCAL_PATCHES" ] && [ "$DXVK_LOCAL_PATCHES" != "null" ]; then
 fi
 
 DXVK_VERSION=$(cd "$WORKDIR/dxvk" && grep -oP "version\s*:\s*'\K[^']+" meson.build | head -1)
-DXVK_VERSION_NAME="${DXVK_VERSION}-arm64ec-gplasync"
+DXVK_VERSION_NAME="${DXVK_VERSION}-arm64ec"
 echo -e "${green}DXVK version: $DXVK_VERSION_NAME${nocolor}"
 
 # --- Generate Meson cross-file ---
@@ -171,8 +210,8 @@ windres = 'arm64ec-w64-mingw32-windres'
 needs_exe_wrapper = true
 
 [built-in options]
-# -fno-lto must come after DXVK's own -flto=auto: LTO bitcode does not
-# resolve the #-prefixed ARM64EC symbols from the static runtime.
+# LTO bitcode does not resolve the #-prefixed ARM64EC symbols from the static
+# runtime, so keep it off even though 3.x no longer enables it by default.
 c_args = ['-O2', '-fno-lto', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections']
 cpp_args = ['-O2', '-fno-lto', '-fomit-frame-pointer', '-ffunction-sections', '-fdata-sections', '-std=c++17']
 c_link_args = ['-fuse-ld=lld', '-Wl,--gc-sections']
@@ -320,11 +359,11 @@ ls -la "$PKGDIR/system32/"
 ls -la "$PKGDIR/syswow64/"
 
 # --- Config.json ---
+# 3.x has no DXVK_ASYNC / DXVK_FRAME_PACE; shader compilation always runs on
+# worker threads and the frame limiter is dxvk.maxFrameRate in dxvk.conf.
 cat > "$PKGDIR/Config.json" << 'CONFEOF'
 {
-  "DXVK_LOG_LEVEL": "none",
-  "DXVK_ASYNC": "1",
-  "DXVK_FRAME_PACE": "low-latency"
+  "DXVK_LOG_LEVEL": "none"
 }
 CONFEOF
 
@@ -353,8 +392,8 @@ cat > "$PKGDIR/profile.json" << PROEOF
 {
   "type": "DXVK",
   "versionName": "$DXVK_VERSION_NAME",
-  "versionCode": 0,
-  "description": "DXVK GPLAsync-LowLatency $DXVK_VERSION — Oryon optimized (arm64ec + i686 PE)",
+  "versionCode": 1,
+  "description": "DXVK $DXVK_VERSION upstream (dxbc-spirv) — arm64ec + i686 PE. Needs Turnip 26.3+ (Vulkan 1.4).",
   "files": [$DLL_FILES
   ]
 }
