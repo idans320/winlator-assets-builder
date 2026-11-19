@@ -16,9 +16,9 @@ All builds are optimized for the **Snapdragon 8 Elite X** platform (`-mcpu=oryon
 |---|---|
 | **Mesa Turnip** | Freedreno Turnip Vulkan driver for Adreno GPUs, built for Android (Bionic libc) targeting the KGSL kernel interface. Produces `vulkan.turnip.so` with metadata. |
 | **FEXCore** | CPU emulation layer (core of FEX-Emu) cross-compiled as Windows ARM64 PE DLLs via llvm-mingw. Provides x86/x86_64 emulation for Wine on ARM64. Ships with a performance-tuned `Config.json`. |
-| **Wine 11 Proton** | Valve's Proton fork of Wine, built for ARM64 Linux with ARM64EC support. Multi-architecture: `arm64ec, aarch64, i386, x86_64`. Ships with `Config.json`, `profile.json`, and ELF interpreter patching. |
+| **Wine 11 Proton** | Valve's Proton fork of Wine (Proton 11.0-2), built for ARM64 Linux with ARM64EC support. Multi-architecture: `arm64ec, aarch64, i386, x86_64`. Links a userspace ntsync library (Rust) for fast synchronisation on Android, ships with `Config.json`, `profile.json`, and ELF interpreter patching. |
 | **Box64** | x86_64-to-ARM64 dynamic recompiler built as an Android native binary via the NDK. ARM dynarec enabled. |
-| **DXVK GPLAsync-LowLatency** | DXVK fork with async pipeline compilation and reduced-latency frame pacing. D3D8/9/10/11 to Vulkan translation layer, cross-compiled as ARM64 PE DLLs. |
+| **DXVK 3.x** | Upstream DXVK (dxbc-spirv shader compiler, descriptor heaps). D3D8/9/10/11 to Vulkan translation layer, cross-compiled as ARM64EC + i686 PE DLLs. Needs a Vulkan 1.4 driver (Mesa Turnip 26.3+). |
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ make dxvk
 | FEXCore | `fexcore-<version>.wcp` |
 | Wine 11 Proton | `wine-arm64-<version>.wcp` |
 | Box64 | `box64-<version>.zip` |
-| DXVK GPLAsync-LowLatency | `<version>-arm64ec-gplasync.wcp` |
+| DXVK 3.x | `<version>-arm64ec.wcp` |
 
 These files are the asset packages that Winlator loads at runtime.
 
@@ -88,7 +88,7 @@ These files are the asset packages that Winlator loads at runtime.
 ├── box64/
 │   └── build.sh            # Builds Box64 emulator
 └── dxvk/
-    └── build.sh            # Builds DXVK GPLAsync-LowLatency (ARM64 PE)
+    └── build.sh            # Builds DXVK 3.x (ARM64EC + i686 PE)
 ```
 
 ## How It Works
