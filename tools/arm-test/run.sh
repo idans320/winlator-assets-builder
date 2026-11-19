@@ -69,6 +69,10 @@ set -o pipefail
 Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
 sleep 2
 
+# Without DISPLAY, Wine has no X connection and CreateWindowEx fails with 1400
+# even though Xvfb is running.
+export DISPLAY=:99
+
 export WINEPREFIX=/prefix
 SYS=$WINEPREFIX/drive_c/windows/system32
 
